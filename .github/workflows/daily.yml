@@ -1,0 +1,299 @@
+name: Aste Easy daily update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+      timezone: "Europe/Rome"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aste-easy-daily-production
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      GOOGLE_GEOCODING_API_KEY: ${{ secrets.GOOGLE_GEOCODING_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      ANNCSU_CACHE_KEY: anncsu-sqlite-v1-20260915
+      ISTAT_BOUNDARY_CACHE_KEY: istat-boundaries-2026-v1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE GOOGLE_GEOCODING_API_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing repository secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Create ephemeral container env file
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
+            printf 'SUPABASE_SERVICE_ROLE=%s\n' "$SUPABASE_SERVICE_ROLE"
+            printf 'GOOGLE_GEOCODING_API_KEY=%s\n' "$GOOGLE_GEOCODING_API_KEY"
+          } > .env.container
+
+      - name: Restore ANNCSU runtime index
+        id: anncsu_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: data/anncsu/anncsu_runtime.sqlite3
+          key: ${{ env.ANNCSU_CACHE_KEY }}
+
+      - name: Bootstrap ANNCSU from private release seed
+        if: steps.anncsu_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/anncsu "$RUNNER_TEMP/anncsu-seed"
+          gh release download cloud-seed \
+            --pattern 'anncsu_runtime.sqlite3.part*' \
+            --dir "$RUNNER_TEMP/anncsu-seed"
+          shopt -s nullglob
+          parts=("$RUNNER_TEMP"/anncsu-seed/anncsu_runtime.sqlite3.part*)
+          if [ "${#parts[@]}" -lt 2 ]; then
+            echo "Expected at least two ANNCSU seed parts in release cloud-seed" >&2
+            exit 1
+          fi
+          cat "${parts[@]}" > data/anncsu/anncsu_runtime.sqlite3
+
+      - name: Verify ANNCSU runtime index
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sqlite3
+          from pathlib import Path
+          p = Path('data/anncsu/anncsu_runtime.sqlite3')
+          expected_size = 2290520064
+          if not p.is_file():
+              raise SystemExit('ANNCSU SQLite missing')
+          if p.stat().st_size != expected_size:
+              raise SystemExit(f'ANNCSU size mismatch: {p.stat().st_size} != {expected_size}')
+          con = sqlite3.connect(f'file:{p.resolve()}?mode=ro', uri=True)
+          try:
+              qc = con.execute('PRAGMA quick_check').fetchone()[0]
+              ver = con.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+              s = con.execute("SELECT value FROM meta WHERE key='strad_rows'").fetchone()[0]
+              i = con.execute("SELECT value FROM meta WHERE key='indir_rows'").fetchone()[0]
+          finally:
+              con.close()
+          if qc != 'ok' or ver != 'anncsu_sqlite_index_v1' or s != '1220962' or i != '27415954':
+              raise SystemExit(f'ANNCSU verification failed: qc={qc} version={ver} strad={s} indir={i}')
+          print(f'ANNCSU PASS: {p.stat().st_size/1024/1024:.1f} MiB')
+          PY
+
+      - name: Save ANNCSU runtime index cache
+        if: steps.anncsu_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: data/anncsu/anncsu_runtime.sqlite3
+          key: ${{ env.ANNCSU_CACHE_KEY }}
+
+      - name: Restore ISTAT municipality boundaries
+        id: istat_boundary_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            data/reference/Limiti01012026.zip
+            data/reference/istat_confini_2026
+          key: ${{ env.ISTAT_BOUNDARY_CACHE_KEY }}
+
+      - name: Download and extract official ISTAT 2026 boundaries
+        if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/reference
+          curl -fL --retry 3 --retry-delay 5 \
+            -A 'AsteEasy-GitHubActions/1.0' \
+            'https://www.istat.it/storage/cartografia/confini_amministrativi/non_generalizzati/2026/Limiti01012026.zip' \
+            -o data/reference/Limiti01012026.zip
+          python - <<'PY'
+          from pathlib import Path
+          import shutil, zipfile
+          z = Path('data/reference/Limiti01012026.zip')
+          if not zipfile.is_zipfile(z):
+              raise SystemExit('ISTAT boundary download is not a valid ZIP')
+          out = Path('data/reference/istat_confini_2026')
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+          with zipfile.ZipFile(z) as f:
+              f.extractall(out)
+          if not list(out.rglob('*.shp')):
+              raise SystemExit('No SHP found in ISTAT boundary archive')
+          (out / '.extracted_ok').write_text('ok', encoding='utf-8')
+          print('ISTAT boundaries PASS')
+          PY
+
+      - name: Save ISTAT municipality boundaries cache
+        if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/reference/Limiti01012026.zip
+            data/reference/istat_confini_2026
+          key: ${{ env.ISTAT_BOUNDARY_CACHE_KEY }}
+
+      - name: Restore mutable Aste Easy state
+        id: runtime_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            runtime-v318-
+
+      - name: Bootstrap mutable state from private release seed
+        if: steps.runtime_restore.outputs.cache-matched-key == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/state-seed"
+          gh release download cloud-seed \
+            --pattern 'aste-easy-state-seed.zip' \
+            --dir "$RUNNER_TEMP/state-seed"
+          unzip -q -o "$RUNNER_TEMP/state-seed/aste-easy-state-seed.zip" -d .
+
+      - name: Verify persistent mutable state
+        id: state_verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s runtime/cache/google_geocode_cache_v8.json
+          test -s runtime/cache/google_api_usage_v9_2.json
+          test -s runtime/cache/historical_geocache_v1.sqlite3
+          test -s runtime/state/google_geocoding_usage_v1.json
+          mkdir -p runtime/raw runtime/reports runtime/cache runtime/state runtime/handoff
+          python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          for p in [Path('runtime/cache/google_api_usage_v9_2.json'), Path('runtime/state/google_geocoding_usage_v1.json')]:
+              json.loads(p.read_text(encoding='utf-8-sig'))
+          p = Path('runtime/cache/historical_geocache_v1.sqlite3')
+          con = sqlite3.connect(f'file:{p.resolve()}?mode=ro', uri=True)
+          try:
+              qc = con.execute('PRAGMA quick_check').fetchone()[0]
+          finally:
+              con.close()
+          if qc != 'ok':
+              raise SystemExit('Historical geocache quick_check failed')
+          print('Mutable state PASS')
+          PY
+
+      - name: Build production container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose build daily
+
+      - name: Mark run start
+        shell: bash
+        run: touch "$RUNNER_TEMP/aste-easy-run-start"
+
+      - name: Run Aste Easy v3.18 production update
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose run --rm daily
+
+      - name: Collect reports created by this run
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/upload
+          mkdir -p runtime/upload
+          if [ -f "$RUNNER_TEMP/aste-easy-run-start" ] && [ -d runtime/reports ]; then
+            while IFS= read -r -d '' f; do
+              cp --parents "$f" runtime/upload/
+            done < <(find runtime/reports -type f -newer "$RUNNER_TEMP/aste-easy-run-start" -print0)
+          fi
+          find runtime/upload -type f -maxdepth 4 -printf '%p\n' || true
+
+      - name: Save mutable state for the next run
+        if: always() && steps.state_verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload current-run reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aste-easy-reports-${{ github.run_id }}
+          path: runtime/upload/runtime/reports
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
+      - name: Upload RAW payloads only on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aste-easy-raw-failure-${{ github.run_id }}
+          path: runtime/raw
+          if-no-files-found: warn
+          retention-days: 3
+          compression-level: 1
+
+      - name: Write run summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          candidates = list(Path('runtime/reports').glob('daily_manifest_v3_18_*.json'))
+          candidates += list(Path('runtime/reports').glob('daily_run_v3_18_*.json'))
+          if not candidates:
+              print('## Aste Easy\n\nNo v3.18 daily summary found.', file=open(Path.home()/Path('summary.txt'),'w'))
+              raise SystemExit(0)
+          p = max(candidates, key=lambda x: x.stat().st_mtime)
+          obj = json.loads(p.read_text(encoding='utf-8-sig'))
+          t = obj.get('timings_seconds') or {}
+          lines = [
+              '## Aste Easy v3.18',
+              '',
+              f'- Report: `{p.name}`',
+              f'- Status: **{obj.get("status", "UNKNOWN")}**',
+              f'- New eligible auctions: **{obj.get("eligible_new", 0)}**',
+              f'- Total seconds: **{t.get("total", "n/a")}**',
+          ]
+          geo = obj.get('geocode_summary') or {}
+          if geo:
+              lines += [
+                  f'- Google network calls: **{geo.get("google_calls", 0)}**',
+                  f'- Google cache hits: **{geo.get("google_cache_hits", 0)}**',
+                  f'- Historical geocache reuses: **{(geo.get("historical_geocache") or {}).get("reused_rows", 0)}**',
+              ]
+          Path('/tmp/aste-summary.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
+          PY
+          if [ -f /tmp/aste-summary.md ]; then cat /tmp/aste-summary.md >> "$GITHUB_STEP_SUMMARY"; fi

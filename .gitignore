@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.*
+!.env.container.example
+start_pipeline.py
+google_geocoding_api_key.bat
+
+# Python/test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+python/
+
+# Local tooling unrelated to production container
+node/
+old/
+backup/
+
+# Mutable runtime - restored from GitHub Actions cache / release seed
+runtime/
+
+# Large ANNCSU sources/index - release seed + GitHub Actions cache
+data/anncsu/*.sqlite3
+data/anncsu/*.csv
+data/anncsu/*.zip
+data/anncsu/*.part*
+
+# ISTAT municipality boundaries - downloaded/cached by workflow
+data/reference/Limiti01012026.zip
+data/reference/istat_confini_2026/
+
+# Local archives
+*.zip
+*.7z

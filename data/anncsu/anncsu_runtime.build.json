@@ -1,0 +1,21 @@
+{
+  "version": "anncsu_sqlite_index_v1",
+  "result": "PASS",
+  "path": "H:\\PVP_Supabase\\tools\\data\\anncsu\\anncsu_runtime.sqlite3",
+  "size_bytes": 2290520064,
+  "strad": {
+    "rows": 1220962,
+    "member": "STRAD_ITA_20260915.csv",
+    "delimiter": ";",
+    "seconds": 13.915
+  },
+  "indir": {
+    "rows": 27415954,
+    "valid_coords": 20731065,
+    "municipalities_bbox": 5493,
+    "member": "INDIR_ITA_20260915.csv",
+    "delimiter": ";",
+    "seconds": 487.677
+  },
+  "total_seconds": 559.095
+}

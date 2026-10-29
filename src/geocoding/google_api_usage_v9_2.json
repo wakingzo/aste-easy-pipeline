@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "months": {
+    "2026-10": {
+      "geocoding": {
+        "network_attempts": 5010,
+        "external_offset": 0
+      },
+      "places_autocomplete": {
+        "network_attempts": 0,
+        "external_offset": 0
+      },
+      "address_validation": {
+        "network_attempts": 0,
+        "external_offset": 0
+      }
+    }
+  },
+  "updated_at_utc": "2026-10-27T16:29:04.437994+00:00",
+  "note": "Canonicalized by Aste Easy live guard v3.11.2; monthly total stored once, external_offset=0."
+}

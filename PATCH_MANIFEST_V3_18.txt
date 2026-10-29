@@ -1,0 +1,20 @@
+Aste Easy v3.18 container-ready overlay
+
+NEW:
+- docker/Dockerfile
+- docker/entrypoint.sh
+- docker-compose.yml
+- requirements-container.txt
+- .dockerignore
+- .env.container.example
+- src/pipeline/container_prepare_state_v3_18.py
+- src/pipeline/container_preflight_v3_18.py
+- src/pipeline/daily_pipeline_v3_18.py
+- src/geocoding/google_production_v3_18.py
+- docs/README_CONTAINER_V3_18.md
+- tests/test_container_portability_v318.py
+
+UPDATED:
+- src/geocoding/locality_guard_runtime_v1.py (optional ISTAT_LOCALITY_INDEX env override; default unchanged)
+
+No data files, secrets, Google cache, usage ledger, ANNCSU DB or ISTAT DB are included.

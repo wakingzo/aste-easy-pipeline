@@ -1,0 +1,23 @@
+name: aste-easy
+
+services:
+  daily:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    env_file:
+      - .env.container
+    environment:
+      ASTE_EASY_CONTAINER: "1"
+      ASTE_ALLOW_LEGACY_CONFIG: "0"
+      TZ: Europe/Rome
+      ANNCSU_SQLITE_INDEX: /app/data/anncsu/anncsu_runtime.sqlite3
+      ISTAT_LOCALITY_INDEX: /app/data/istat/istat_localita_2021.sqlite3
+      GOOGLE_STATE_DIR: /app/runtime/cache
+      GOOGLE_API_USAGE_FILE: /app/runtime/cache/google_api_usage_v9_2.json
+      GOOGLE_GEOCODE_CACHE_FILE: /app/runtime/cache/google_geocode_cache_v8.json
+    volumes:
+      - ./data:/app/data
+      - ./runtime:/app/runtime
+    init: true
+    restart: "no"

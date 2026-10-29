@@ -1,0 +1,21 @@
+# Secrets / local Python
+.env
+.env.*
+!.env.container.example
+python/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Large/persistent runtime assets are bind-mounted, not baked into the image
+data/
+runtime/
+
+# Historical/tooling bulk not needed by production container
+node/
+old/
+.git/
+.gitignore
+*.zip

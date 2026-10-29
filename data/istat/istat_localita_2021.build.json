@@ -1,0 +1,33 @@
+{
+  "version": "istat_locality_index_v1",
+  "result": "PASS",
+  "created_at": "2026-10-29T07:03:54.849481+01:00",
+  "source_url": "https://www.istat.it/storage/cartografia/basi_territoriali/2021/LocalitaPuntuali_21.zip",
+  "zip": "H:\\PVP_Supabase\\tools\\data\\istat\\LocalitaPuntuali_21.zip",
+  "db": "H:\\PVP_Supabase\\tools\\data\\istat\\istat_localita_2021.sqlite3",
+  "dbf_member": "LocalitàPuntuali_21/Localita_2021_Point.dbf",
+  "shp_member": "LocalitàPuntuali_21/Localita_2021_Point.shp",
+  "fields": [
+    "COD_REG",
+    "COD_UTS",
+    "PRO_COM",
+    "LOC_ID",
+    "LOC",
+    "TIPO_LOC",
+    "NOME",
+    "CENTRO_CL",
+    "ALTITUDINE",
+    "POP21",
+    "FAM21",
+    "ABI21",
+    "EDI21",
+    "POINT_X",
+    "POINT_Y"
+  ],
+  "rows_dbf": 69003,
+  "rows_shp": 69003,
+  "rows_indexed": 69003,
+  "rows_skipped": 0,
+  "size_bytes": 7110656,
+  "seconds": 2.139
+}

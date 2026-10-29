@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Aste Easy - daily non-interactive pipeline (cloud-ready scaffold).
+
+Default is DRY RUN: build + incremental importer dry-run, no DB writes and no Google.
+Use --apply for the real daily job: build -> importer apply -> touched-only geocoder apply.
+Secrets/config come from environment; local legacy start_pipeline.py is only a temporary fallback.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+SRC_ROOT = Path(__file__).resolve().parents[1]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from aste_paths import GEOCODING_DIR, HANDOFF_DIR, IMPORTER_DIR, ensure_runtime_dirs
+from project_env import load_project_env
+
+BUILD = IMPORTER_DIR / "build_listings_from_pvp_api_RAW_ONLY.py"
+IMPORTER = IMPORTER_DIR / "pvp_import_incremental_v12_3.py"
+GEOCODER = GEOCODING_DIR / "geocode_unified_v11_6_4_live.py"
+
+
+def run_step(title: str, script: Path, *, args=None, env=None) -> None:
+    print("\n" + "=" * 72)
+    print(title)
+    print("=" * 72)
+    if not script.exists():
+        raise SystemExit(f"ERRORE: script mancante: {script}")
+    cmd = [sys.executable, str(script)] + [str(x) for x in (args or [])]
+    cp = subprocess.run(cmd, env=env or os.environ.copy())
+    if cp.returncode:
+        raise SystemExit(cp.returncode)
+
+
+def handoff_path() -> Path:
+    stamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    return HANDOFF_DIR / f"geocode_handoff_daily_{stamp}.jsonl"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--apply", action="store_true", help="INSERT nuove aste + PATCH geocode touched")
+    ap.add_argument("--skip-build", action="store_true")
+    ap.add_argument("--skip-geocode", action="store_true")
+    args = ap.parse_args()
+
+    ensure_runtime_dirs()
+    required = ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE") + (("GOOGLE_GEOCODING_API_KEY",) if args.apply and not args.skip_geocode else ())
+    load_project_env(required=required)
+
+    env = os.environ.copy()
+    # Daily incremental defaults; all can be overridden by scheduler/container env.
+    env.setdefault("STOP_ON_OLD_PUBLICATION", "1")
+    env.setdefault("AUTO_MIN_DATA_PUBBLICAZIONE_FROM_DB", "1")
+    env.setdefault("MIN_DATA_PUBBLICAZIONE_SAFETY_DAYS", "2")
+    env.setdefault("STOP_ON_PAST", "1")
+    env.setdefault("MAX_PAGES", "0")
+    env.setdefault("MAX_DETAILS", "0")
+
+    if not args.skip_build:
+        run_step("STEP 1 - BUILD PVP RAW", BUILD, env=env)
+
+    if not args.apply:
+        run_step("STEP 2 - IMPORTER v12.3 DRY RUN", IMPORTER, env=env)
+        print("\n[DRY RUN COMPLETATO] Nessuna scrittura DB, nessuna chiamata Google.")
+        return 0
+
+    handoff = handoff_path()
+    run_step(
+        "STEP 2 - IMPORTER v12.3 APPLY",
+        IMPORTER,
+        args=["--apply", "--handoff-manifest", str(handoff)],
+        env=env,
+    )
+
+    if args.skip_geocode:
+        print(f"\n[OK] Import completato. Handoff conservato: {handoff}")
+        return 0
+
+    geo_env = dict(env)
+    geo_env["UNIFIED_SCOPE"] = "touched"
+    geo_env["UNIFIED_TOUCHED_MANIFEST"] = str(handoff)
+    geo_env["UNIFIED_LIMIT"] = "0"
+    run_step("STEP 3 - UNIFIED GEOCODER v11.6.4 APPLY (TOUCHED)", GEOCODER, args=["--apply"], env=geo_env)
+
+    print("\n[OK] DAILY PIPELINE COMPLETATA")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
