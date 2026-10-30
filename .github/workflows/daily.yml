@@ -172,12 +172,45 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$RUNNER_TEMP/state-seed"
+
           gh release download cloud-seed \
             --pattern 'aste-easy-state-seed.zip' \
             --dir "$RUNNER_TEMP/state-seed"
-          unzip -q -o "$RUNNER_TEMP/state-seed/aste-easy-state-seed.zip" -d .
 
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          zip_path = (
+              pathlib.Path(os.environ["RUNNER_TEMP"])
+              / "state-seed"
+              / "aste-easy-state-seed.zip"
+          )
+
+          with zipfile.ZipFile(zip_path) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace("\\", "/").lstrip("/")
+
+                  if not name:
+                      continue
+
+                  target = pathlib.Path(name)
+
+                  if info.is_dir() or name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+
+                  target.parent.mkdir(parents=True, exist_ok=True)
+
+                  with zf.open(info) as src, open(target, "wb") as dst:
+                      shutil.copyfileobj(src, dst)
+
+          print("State seed extracted successfully.")
+          PY
       - name: Verify persistent mutable state
         id: state_verify
         shell: bash
