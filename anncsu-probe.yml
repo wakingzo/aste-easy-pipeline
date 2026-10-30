@@ -1,0 +1,40 @@
+name: ANNCSU API probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Probe ANNCSU Open Data API
+        shell: bash
+        run: |
+          set +e
+
+          python src/geocoding/anncsu_api_probe_v1.py \
+            --resource odonimi \
+            --codice-comune G273 \
+            --denominazione ROMA \
+            --timeout 20 \
+            | tee anncsu_probe.txt
+
+          code=${PIPESTATUS[0]}
+
+          {
+            echo "## ANNCSU API probe"
+            echo
+            cat anncsu_probe.txt
+            echo
+            echo "Probe exit code: $code"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit 0
