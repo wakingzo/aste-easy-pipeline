@@ -577,25 +577,31 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     provincia = sanitize_text(s_addr.get("provincia"))
     cap = sanitize_text(s_addr.get("cap"))
 
-    # Il PVP a volte inserisce nel campo "via" anche CAP + Comune + sigla,
-    # mentre il campo "citta" contiene un Comune diverso.
-    # Usiamo la coda incorporata solo quando la tripla è verificata
-    # esattamente nel reference locale.
-    embedded_admin = extract_verified_admin_tail(s_via)
+    # La coda CAP + Comune + sigla dentro "via" è solo un'evidenza:
+    # l'audit storico ha dimostrato che può essere corretta oppure errata.
+    # NON deve quindi sovrascrivere automaticamente comune/CAP/sigla.
+    embedded_admin_candidate = extract_verified_admin_tail(s_via)
 
-    if embedded_admin:
-        s_via = embedded_admin["via"]
-        comune = embedded_admin["comune"]
-        cap = embedded_admin["cap"]
+    # Manteniamo disattivato l'override amministrativo finché il resolver
+    # a consenso non è stato validato.
+    embedded_admin = None
+
+    # Per il solo controllo del civico possiamo usare la parte stradale
+    # estratta, senza modificare l'indirizzo o i dati amministrativi.
+    s_via_for_civic_check = (
+        embedded_admin_candidate["via"]
+        if embedded_admin_candidate
+        else s_via
+    )
 
     # Evita di duplicare il civico quando il PVP lo inserisce sia dentro "via"
     # sia nel campo separato "numeroCivico".
     civic_already_in_via = False
 
-    if s_via and s_num:
+    if s_via_for_civic_check and s_num:
         tail_civic = re.search(
             r"(\d{1,4}(?:\s*[/\-]?\s*[A-Za-z])?)\s*$",
-            s_via.rstrip(" ,"),
+            s_via_for_civic_check.rstrip(" ,"),
             flags=re.IGNORECASE,
         )
         if tail_civic:
