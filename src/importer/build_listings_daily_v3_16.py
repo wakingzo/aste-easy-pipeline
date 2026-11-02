@@ -665,7 +665,12 @@ def property_description_text(
             values.append(value)
 
     lotto = detail_body.get("lotto") or {}
-    for bene in lotto.get("beni") or []:
+
+    beni = []
+    beni.extend(detail_body.get("beni") or [])
+    beni.extend(lotto.get("beni") or [])
+
+    for bene in beni:
         value = sanitize_text((bene or {}).get("descBene"))
         if value:
             values.append(value)
