@@ -664,18 +664,28 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     provincia = sanitize_text(s_addr.get("provincia"))
     cap = sanitize_text(s_addr.get("cap"))
 
-    # La coda CAP + Comune + sigla dentro "via" è solo un'evidenza:
-    # l'audit storico ha dimostrato che può essere corretta oppure errata.
-    # NON deve quindi sovrascrivere automaticamente comune/CAP/sigla.
+    # La coda CAP + Comune + sigla dentro "via" è un'evidenza,
+    # non un'autorità assoluta.
     embedded_admin_candidate = extract_verified_admin_tail(s_via)
 
-    # Manteniamo disattivato l'override amministrativo finché il resolver
-    # a consenso non è stato validato.
+    # L'embedded può vincere solo quando il resolver conservativo
+    # trova una conferma esplicita nella descrizione del bene/lotto.
     embedded_admin = None
 
-    # Per il solo controllo del civico possiamo usare la parte stradale
-    # estratta, senza modificare l'indirizzo o i dati amministrativi.
-    s_via_for_civic_check = (
+    if description_confirms_embedded_admin(
+        search_item,
+        detail_body,
+        comune,
+        provincia,
+        embedded_admin_candidate,
+    ):
+        embedded_admin = embedded_admin_candidate
+        comune = embedded_admin["comune"]
+        cap = embedded_admin["cap"]
+
+    # Quando esiste una coda amministrativa verificata, separiamo sempre
+    # la sola parte stradale per gestire correttamente il civico.
+    s_via_street = (
         embedded_admin_candidate["via"]
         if embedded_admin_candidate
         else s_via
@@ -685,21 +695,33 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     # sia nel campo separato "numeroCivico".
     civic_already_in_via = False
 
-    if s_via_for_civic_check and s_num:
+    if s_via_street and s_num:
         tail_civic = re.search(
             r"(\d{1,4}(?:\s*[/\-]?\s*[A-Za-z])?)\s*$",
-            s_via_for_civic_check.rstrip(" ,"),
+            s_via_street.rstrip(" ,"),
             flags=re.IGNORECASE,
         )
         if tail_civic:
-            via_civic = re.sub(r"[^0-9a-z]", "", tail_civic.group(1).lower())
-            field_civic = re.sub(r"[^0-9a-z]", "", s_num.lower())
-            civic_already_in_via = bool(via_civic and via_civic == field_civic)
+            via_civic = re.sub(
+                r"[^0-9a-z]",
+                "",
+                tail_civic.group(1).lower(),
+            )
+            field_civic = re.sub(
+                r"[^0-9a-z]",
+                "",
+                s_num.lower(),
+            )
+            civic_already_in_via = bool(
+                via_civic and via_civic == field_civic
+            )
 
     s_via_full = (
-        s_via
+        s_via_street
         if civic_already_in_via
-        else " ".join([x for x in [s_via, s_num] if x]).strip() or s_via
+        else " ".join(
+            [x for x in [s_via_street, s_num] if x]
+        ).strip() or s_via_street
     )
 
     coords = s_addr.get("coordinate") or {}
@@ -708,15 +730,82 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
 
     geo = lookup_geo(comune, provincia, cap)
     regione = geo.get("regione")
+
     sigla_provincia = (
         embedded_admin["sigla_provincia"]
         if embedded_admin
         else geo.get("sigla_provincia")
     )
+
     cap = geo.get("cap")
 
-    indirizzo_txt = build_full_property_address(s_via_full, cap, comune, sigla_provincia)
-    address_for_maps = ", ".join([x for x in [s_via_full, cap, comune, provincia, "Italia"] if x])
+    # Dopo la risoluzione confrontiamo l'amministrazione scelta con quella
+    # incorporata nel campo "via". Se differiscono e l'embedded non è stato
+    # confermato, il conflitto resta intenzionalmente irrisolto.
+    embedded_conflict_unresolved = False
+
+    if embedded_admin_candidate and not embedded_admin:
+        candidate_comune = normalize_admin_match_text(
+            embedded_admin_candidate.get("comune")
+        )
+        current_comune = normalize_admin_match_text(comune)
+
+        candidate_cap = sanitize_text(
+            embedded_admin_candidate.get("cap")
+        )
+        current_cap = sanitize_text(cap)
+
+        candidate_sigla = (
+            sanitize_text(
+                embedded_admin_candidate.get("sigla_provincia")
+            ) or ""
+        ).upper()
+
+        current_sigla = (
+            sanitize_text(sigla_provincia) or ""
+        ).upper()
+
+        embedded_conflict_unresolved = (
+            candidate_comune != current_comune
+            or candidate_cap != current_cap
+            or candidate_sigla != current_sigla
+        )
+
+    if embedded_conflict_unresolved:
+        # Non inventiamo un indirizzo ibrido.
+        # Preserviamo la versione amministrativa realmente presente nella via PVP.
+        indirizzo_txt = build_full_property_address(
+            s_via_full,
+            embedded_admin_candidate["cap"],
+            embedded_admin_candidate["comune"],
+            embedded_admin_candidate["sigla_provincia"],
+        )
+
+        # Se abbiamo coordinate PVP, build_maps_link() userà quelle.
+        # Se non le abbiamo, NON creiamo una ricerca Maps su un comune dubbio.
+        address_for_maps = None
+
+    else:
+        indirizzo_txt = build_full_property_address(
+            s_via_full,
+            cap,
+            comune,
+            sigla_provincia,
+        )
+
+        address_for_maps = ", ".join(
+            [
+                x
+                for x in [
+                    s_via_full,
+                    cap,
+                    comune,
+                    provincia,
+                    "Italia",
+                ]
+                if x
+            ]
+        )
 
     procedura = detail_body.get("procedura") or {}
     soggetti = detail_body.get("soggetti") or []
