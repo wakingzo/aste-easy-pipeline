@@ -96,6 +96,22 @@ jobs:
               False,
           )
 
+          check(
+              "Lisciano Niccone confirmed as current DB comune",
+              b.description_confirms_current_admin(
+                  {"descLotto": "LISCIANO NICCONE (PG) VIA LISCIANO NICCONE N. 35"},
+                  {},
+                  "Lisciano Niccone",
+                  {
+                      "via": "Frazione Niccone, 35",
+                      "cap": "06019",
+                      "comune": "Umbertide",
+                      "sigla_provincia": "PG",
+                  },
+              ),
+              True,
+          )
+
           # 3) Storico reale: la descrizione cita entrambi i comuni.
           #    Fail closed: nessun override.
           check(
