@@ -2,12 +2,6 @@ name: Historical KEEP_DB cleanup preview
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/historical-keep-db-cleanup-preview.yml"
-      - "src/importer/build_listings_daily_v3_16.py"
 
 permissions:
   contents: read
