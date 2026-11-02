@@ -405,11 +405,29 @@ jobs:
                       proposed_cap and proposed_sigla
                   )
 
-              final_action = (
-                  "AUTO_SAFE_REFERENCE_FIX"
-                  if auto_safe
-                  else action
-              )
+              # Final point-4 policy:
+              # - never auto-fix province sigla conflicts here;
+              # - keep valid multi-CAP alternatives untouched;
+              # - auto-fix only same-comune + same-sigla CAP errors,
+              #   taking the verified embedded PVP CAP.
+              if current_sigla != embedded_sigla:
+                  final_action = "REVIEW_SIGLA"
+                  proposed_cap = ""
+                  proposed_sigla = ""
+              elif current_pair_valid:
+                  final_action = "KEEP_AS_IS"
+                  proposed_cap = ""
+                  proposed_sigla = ""
+              elif (
+                  current_cap
+                  and current_cap != embedded_cap
+                  and embedded_pair_valid
+              ):
+                  final_action = "AUTO_SAFE_PVP_CAP_FIX"
+                  proposed_cap = embedded_cap
+                  proposed_sigla = current_sigla
+              else:
+                  final_action = action
 
               preview.append({
                   "pvp_id": row.get("pvp_id"),
@@ -522,7 +540,7 @@ jobs:
               "auto_safe_ids": [
                   str(x["pvp_id"])
                   for x in preview
-                  if x["action"] == "AUTO_SAFE_REFERENCE_FIX"
+                  if x["action"] == "AUTO_SAFE_PVP_CAP_FIX"
               ],
               "keep_as_is_ids": [
                   str(x["pvp_id"])
@@ -567,9 +585,9 @@ jobs:
           }, ensure_ascii=False, indent=2))
 
           print()
-          print("[AUTO_SAFE_REFERENCE_FIX]")
+          print("[AUTO_SAFE_PVP_CAP_FIX]")
           for rec in preview:
-              if rec["action"] == "AUTO_SAFE_REFERENCE_FIX":
+              if rec["action"] == "AUTO_SAFE_PVP_CAP_FIX":
                   print(
                       f"{rec['pvp_id']}: {rec['comune']} | "
                       f"CAP {rec['current_cap']!r}->{rec['proposed_cap']!r} | "
