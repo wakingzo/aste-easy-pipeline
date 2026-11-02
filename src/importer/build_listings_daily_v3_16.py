@@ -173,9 +173,10 @@ def _fmt_value(v: Any) -> str:
 def load_geo_maps():
     province_map: Dict[str, Dict[str, Optional[str]]] = {}
     comune_prov_map: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {}
+    valid_admin_triples = set()
 
     if not COMUNI_CSV.exists():
-        return province_map, comune_prov_map
+        return province_map, comune_prov_map, valid_admin_triples
 
     prov_acc = {}
 
@@ -193,6 +194,10 @@ def load_geo_maps():
                 cap_digits = "".join(ch for ch in str(cap) if ch.isdigit())
                 if 1 <= len(cap_digits) <= 5:
                     cap = cap_digits.zfill(5)
+                    if cap and comune and sigla:
+                        valid_admin_triples.add(
+                        (cap, comune.strip().lower(), sigla.strip().upper())
+                    )
             if comune and provincia:
                 comune_prov_map[(comune.lower(), provincia.lower())] = {
                     "cap": cap or None,
@@ -215,10 +220,9 @@ def load_geo_maps():
             "regione": next(iter(acc["regioni"])) if len(acc["regioni"]) == 1 else None,
         }
 
-    return province_map, comune_prov_map
+    return province_map, comune_prov_map, valid_admin_triples
 
-
-PROVINCE_MAP, COMUNE_PROV_MAP = load_geo_maps()
+PROVINCE_MAP, COMUNE_PROV_MAP, VALID_ADMIN_TRIPLES = load_geo_maps()
 
 
 def lookup_geo(comune: Optional[str], provincia: Optional[str], cap: Optional[str]) -> Dict[str, Optional[str]]:
