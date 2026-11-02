@@ -1,0 +1,313 @@
+name: Regression preview - address guards
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Python dependency
+        run: python -m pip install --disable-pip-version-check requests
+
+      - name: Run address regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path.cwd()
+          sys.path.insert(0, str((root / "src").resolve()))
+          sys.path.insert(0, str((root / "src" / "importer").resolve()))
+          sys.path.insert(0, str((root / "src" / "geocoding").resolve()))
+
+          import build_listings_daily_v3_16 as builder
+          import google_geocode_core_v9_3_6 as g
+
+          def check(label, condition, detail=""):
+              if not condition:
+                  raise AssertionError(f"{label} FAILED: {detail}")
+              print(f"[PASS] {label}" + (f": {detail}" if detail else ""))
+
+          borgosesia = builder.build_listing_row(
+              {
+                  "id": "TEST-BORGOSESIA",
+                  "descLotto": (
+                      "In Borgosesia, alloggio al piano primo dello stabile "
+                      "con accessoria cantina. Il tutto distinto al C.F. del "
+                      "Comune di Borgosesia, via Vittorio Veneto n. 78."
+                  ),
+                  "indirizzo": {
+                      "via": "Via Vittorio Veneto, 78, 13011 Borgosesia VC",
+                      "numeroCivico": "78",
+                      "cap": "13011",
+                      "citta": "Vercelli",
+                      "provincia": "Vercelli",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Borgosesia confirmed override",
+              borgosesia.get("comune") == "Borgosesia",
+              repr(borgosesia.get("comune")),
+          )
+          check(
+              "Borgosesia CAP",
+              borgosesia.get("cap") == "13011",
+              repr(borgosesia.get("cap")),
+          )
+          check(
+              "Borgosesia sigla",
+              borgosesia.get("sigla_provincia") == "VC",
+              repr(borgosesia.get("sigla_provincia")),
+          )
+          check(
+              "Borgosesia clean address",
+              borgosesia.get("indirizzo")
+              == "Via Vittorio Veneto, 78, 13011 Borgosesia (VC)",
+              repr(borgosesia.get("indirizzo")),
+          )
+          check(
+              "Borgosesia no duplicate civic",
+              "78 78" not in (borgosesia.get("indirizzo") or ""),
+              repr(borgosesia.get("indirizzo")),
+          )
+
+          nettuno = builder.build_listing_row(
+              {
+                  "id": "TEST-NETTUNO",
+                  "descLotto": "Appartamento e lastrico solare",
+                  "indirizzo": {
+                      "via": "Via del Tridente, 39, 00048 Nettuno RM",
+                      "numeroCivico": "39",
+                      "cap": "00048",
+                      "citta": "Velletri",
+                      "provincia": "Roma",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Nettuno unresolved keeps DB comune",
+              nettuno.get("comune") == "Velletri",
+              repr(nettuno.get("comune")),
+          )
+          check(
+              "Nettuno preserves PVP address without hybrid",
+              nettuno.get("indirizzo")
+              == "Via del Tridente, 39, 00048 Nettuno (RM)",
+              repr(nettuno.get("indirizzo")),
+          )
+          check(
+              "Nettuno no duplicate civic",
+              "39 39" not in (nettuno.get("indirizzo") or ""),
+              repr(nettuno.get("indirizzo")),
+          )
+          check(
+              "Nettuno ambiguous text Maps disabled",
+              nettuno.get("maps_link") is None,
+              repr(nettuno.get("maps_link")),
+          )
+
+          montecassiano = builder.build_listing_row(
+              {
+                  "id": "TEST-MONTECASSIANO",
+                  "descLotto": (
+                      "Diritti pari a 1/1 di piena proprietà di abitazione "
+                      "al piano terra e primo di porzione di un fabbricato."
+                  ),
+                  "indirizzo": {
+                      "via": "Via Sant'Anna, 2, 62010 Montecassiano MC",
+                      "numeroCivico": "2",
+                      "cap": "62010",
+                      "citta": "Macerata",
+                      "provincia": "Macerata",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Montecassiano unresolved keeps DB comune",
+              montecassiano.get("comune") == "Macerata",
+              repr(montecassiano.get("comune")),
+          )
+          check(
+              "Montecassiano preserves PVP address without hybrid",
+              montecassiano.get("indirizzo")
+              == "Via Sant'Anna, 2, 62010 Montecassiano (MC)",
+              repr(montecassiano.get("indirizzo")),
+          )
+          check(
+              "Montecassiano ambiguous text Maps disabled",
+              montecassiano.get("maps_link") is None,
+              repr(montecassiano.get("maps_link")),
+          )
+
+          lisciano = builder.build_listing_row(
+              {
+                  "id": "TEST-LISCIANO",
+                  "descLotto": "LISCIANO NICCONE (PG) VIA LISCIANO NICCONE N. 35",
+                  "indirizzo": {
+                      "via": "Frazione Niccone, 35, 06019 Umbertide PG",
+                      "numeroCivico": "35",
+                      "cap": "06019",
+                      "citta": "Lisciano Niccone",
+                      "provincia": "Perugia",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Lisciano blocks wrong embedded comune",
+              lisciano.get("comune") == "Lisciano Niccone",
+              repr(lisciano.get("comune")),
+          )
+          check(
+              "Lisciano text Maps disabled on unresolved conflict",
+              lisciano.get("maps_link") is None,
+              repr(lisciano.get("maps_link")),
+          )
+
+          normal = builder.build_listing_row(
+              {
+                  "id": "TEST-NORMAL",
+                  "indirizzo": {
+                      "via": "Via Roma",
+                      "numeroCivico": "12",
+                      "cap": "07026",
+                      "citta": "Olbia",
+                      "provincia": "Sassari",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Normal Olbia unchanged",
+              normal.get("comune") == "Olbia",
+              repr(normal.get("comune")),
+          )
+          check(
+              "Normal civic added",
+              normal.get("indirizzo") == "Via Roma 12, 07026 Olbia (SS)",
+              repr(normal.get("indirizzo")),
+          )
+          check(
+              "Normal Maps link available",
+              bool(normal.get("maps_link")),
+              repr(normal.get("maps_link")),
+          )
+
+          nettuno_coords = builder.build_listing_row(
+              {
+                  "id": "TEST-NETTUNO-COORDS",
+                  "descLotto": "Appartamento e lastrico solare",
+                  "indirizzo": {
+                      "via": "Via del Tridente, 39, 00048 Nettuno RM",
+                      "numeroCivico": "39",
+                      "cap": "00048",
+                      "citta": "Velletri",
+                      "provincia": "Roma",
+                      "coordinate": {
+                          "latitudine": 41.45,
+                          "longitudine": 12.66,
+                      },
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Ambiguous case keeps coordinate Maps link",
+              nettuno_coords.get("maps_link")
+              == "https://www.google.com/maps?q=41.45,12.66",
+              repr(nettuno_coords.get("maps_link")),
+          )
+
+          bruscoli = g.phrase_similarity(
+              "Via Bruscoli",
+              "Via Bruscoli Tabina",
+          )
+          cavour = g.phrase_similarity(
+              "Via Cavour",
+              "Via Camillo Benso Conte di Cavour",
+          )
+          garibaldi = g.phrase_similarity(
+              "Via Giuseppe Garibaldi",
+              "Via Garibaldi",
+          )
+
+          check(
+              "Bruscoli/Tabina below acceptance threshold",
+              bruscoli is not None and bruscoli < 0.55,
+              repr(bruscoli),
+          )
+          check(
+              "Cavour expansion remains accepted",
+              cavour is not None and cavour >= 0.55,
+              repr(cavour),
+          )
+          check(
+              "Garibaldi abbreviation remains accepted",
+              garibaldi is not None and garibaldi >= 0.55,
+              repr(garibaldi),
+          )
+
+          row = {
+              "indirizzo": (
+                  "Frazione Bruscoli, via Bruscoli 48, "
+                  "50033 Firenzuola Firenze"
+              ),
+              "comune": "Firenzuola",
+              "sigla_provincia": "FI",
+              "cap": "50033",
+          }
+          result = {
+              "ok": True,
+              "lat": 44.1376642,
+              "lon": 11.2554945,
+              "formatted_address": (
+                  "Via Bruscoli Tabina, 48, "
+                  "50033 Firenzuola FI, Italia"
+              ),
+              "location_type": "RANGE_INTERPOLATED",
+              "components": [
+                  {"long_name": "48", "short_name": "48", "types": ["street_number"]},
+                  {"long_name": "Via Bruscoli Tabina", "short_name": "Via Bruscoli Tabina", "types": ["route"]},
+                  {"long_name": "Firenzuola", "short_name": "Firenzuola", "types": ["locality"]},
+                  {"long_name": "Firenze", "short_name": "FI", "types": ["administrative_area_level_2"]},
+                  {"long_name": "50033", "short_name": "50033", "types": ["postal_code"]},
+              ],
+          }
+
+          evaluation = g.score_forward_candidate(row, result)
+          check(
+              "Full scorer rejects Bruscoli Tabina",
+              evaluation is None,
+              repr(evaluation),
+          )
+
+          print()
+          print("ALL ADDRESS REGRESSION CHECKS PASSED")
+          PY
