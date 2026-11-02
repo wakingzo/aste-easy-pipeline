@@ -227,6 +227,41 @@ def load_geo_maps():
 PROVINCE_MAP, COMUNE_PROV_MAP, VALID_ADMIN_TRIPLES = load_geo_maps()
 
 
+def build_unique_comune_sigla_cap_map():
+    caps_by_key = {}
+
+    for cap, comune, sigla in VALID_ADMIN_TRIPLES:
+        key = (comune.lower(), sigla.upper())
+        caps_by_key.setdefault(key, set()).add(cap)
+
+    return {
+        key: next(iter(caps))
+        for key, caps in caps_by_key.items()
+        if len(caps) == 1
+    }
+
+
+UNIQUE_COMUNE_SIGLA_CAP_MAP = build_unique_comune_sigla_cap_map()
+
+
+def unique_reference_cap(
+    comune: Optional[str],
+    provincia: Optional[str],
+) -> Optional[str]:
+    if not comune or not provincia:
+        return None
+
+    pinfo = PROVINCE_MAP.get(provincia.lower()) or {}
+    sigla = sanitize_text(pinfo.get("sigla_provincia"))
+
+    if not sigla:
+        return None
+
+    return UNIQUE_COMUNE_SIGLA_CAP_MAP.get(
+        (comune.lower(), sigla.upper())
+    )
+
+
 def lookup_geo(comune: Optional[str], provincia: Optional[str], cap: Optional[str]) -> Dict[str, Optional[str]]:
     result = {"regione": None, "sigla_provincia": None, "cap": cap}
 
@@ -716,6 +751,20 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         embedded_admin_candidate,
     )
 
+    # Se la descrizione conferma il comune DB e il CAP separato coincide
+    # con quello dell'embedded scartato, quel CAP non è più affidabile.
+    # Recuperiamo un CAP dal reference solo quando il comune ne ha uno
+    # univoco; per i comuni multi-CAP lasciamo il CAP vuoto, fail closed.
+    current_admin_cap_replaced = False
+
+    if current_admin_confirmed and embedded_admin_candidate:
+        embedded_cap = sanitize_text(
+            embedded_admin_candidate.get("cap")
+        )
+        if embedded_cap and sanitize_text(cap) == embedded_cap:
+            cap = unique_reference_cap(comune, provincia)
+            current_admin_cap_replaced = True
+
     if description_confirms_embedded_admin(
         search_item,
         detail_body,
@@ -781,7 +830,11 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         else geo.get("sigla_provincia")
     )
 
-    cap = geo.get("cap")
+    cap = (
+        cap
+        if current_admin_cap_replaced
+        else geo.get("cap")
+    )
 
     # Dopo la risoluzione confrontiamo l'amministrazione scelta con quella
     # incorporata nel campo "via". Se differiscono e l'embedded non è stato
