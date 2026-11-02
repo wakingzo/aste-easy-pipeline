@@ -588,7 +588,26 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         comune = embedded_admin["comune"]
         cap = embedded_admin["cap"]
 
-    s_via_full = " ".join([x for x in [s_via, s_num] if x]).strip() or s_via
+    # Evita di duplicare il civico quando il PVP lo inserisce sia dentro "via"
+    # sia nel campo separato "numeroCivico".
+    civic_already_in_via = False
+
+    if s_via and s_num:
+        tail_civic = re.search(
+            r"(\d{1,4}(?:\s*[/\-]?\s*[A-Za-z])?)\s*$",
+            s_via.rstrip(" ,"),
+            flags=re.IGNORECASE,
+        )
+        if tail_civic:
+            via_civic = re.sub(r"[^0-9a-z]", "", tail_civic.group(1).lower())
+            field_civic = re.sub(r"[^0-9a-z]", "", s_num.lower())
+            civic_already_in_via = bool(via_civic and via_civic == field_civic)
+
+    s_via_full = (
+        s_via
+        if civic_already_in_via
+        else " ".join([x for x in [s_via, s_num] if x]).strip() or s_via
+    )
 
     coords = s_addr.get("coordinate") or {}
     lat = coords.get("latitudine")
