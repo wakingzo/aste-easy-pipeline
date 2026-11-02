@@ -7,6 +7,7 @@ on:
       - main
     paths:
       - ".github/workflows/historical-keep-db-cleanup-preview.yml"
+      - "src/importer/build_listings_daily_v3_16.py"
 
 permissions:
   contents: read
