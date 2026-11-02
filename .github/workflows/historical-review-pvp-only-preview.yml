@@ -1,0 +1,392 @@
+name: Historical REVIEW PVP-only preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/historical-review-pvp-only-preview.yml"
+      - "src/importer/build_listings_daily_v3_16.py"
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build read-only PVP evidence preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import sys
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          import requests
+
+          ROOT = Path.cwd()
+          sys.path.insert(0, str((ROOT / "src").resolve()))
+          sys.path.insert(0, str((ROOT / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as builder
+
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          # The 22 original REVIEW rows plus 4643975 moved here from KEEP_DB.
+          CASES = {
+              "4594887": ("Rovigo", "Gaiba"),
+              "4630191": ("Volpago del Montello", "Giavera del Montello"),
+              "4631727": ("Benevento", "Cautano"),
+              "4632375": ("Arezzo", "Castiglion Fiorentino"),
+              "4638172": ("Ancona", "Castelplanio"),
+              "4638721": ("Pietravairano", "Caserta"),
+              "4640407": ("Milano", "Nerviano"),
+              "4641706": ("Calliano", "Calliano Monferrato"),
+              "4642803": ("Castelfidardo", "Ancona"),
+              "4642993": ("Cuneo", "Casalgrasso"),
+              "4643130": ("San Damiano Macra", "Cuneo"),
+              "4643975": ("Roma", "Ponzano Romano"),
+              "4645962": ("Pisogne", "Seniga"),
+              "4647093": ("Chianni", "Riparbella"),
+              "4647507": ("Ancona", "Corinaldo"),
+              "4650512": ("Gambassi Terme", "Firenze"),
+              "4652593": ("Popoli Terme", "Pescara"),
+              "4653350": ("Monterosso Almo", "Pozzallo"),
+              "4653363": ("Asti", "Dusino San Michele"),
+              "4653373": ("Monterosso Almo", "Pozzallo"),
+              "4654174": ("Osio Sotto", "Bergamo"),
+              "4654316": ("Macerata", "Montecassiano"),
+              "4654522": ("Velletri", "Nettuno"),
+          }
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(r"\s+", " ", str(v).replace("\u00a0", " ")).strip()
+
+          def norm(v):
+              return builder.normalize_admin_match_text(v)
+
+          # Canonical municipality names from the deterministic reference.
+          ref_names = {}
+          for _cap, comune, sigla in builder.VALID_ADMIN_TRIPLES:
+              n = norm(comune)
+              if n:
+                  ref_names.setdefault(n, comune)
+
+          def reference_communes_mentioned(text):
+              # Diagnostic only. These mentions NEVER auto-promote a row.
+              # We keep the longest names first to make the report readable.
+              out = []
+              for n in sorted(ref_names, key=len, reverse=True):
+                  if len(n) < 4:
+                      continue
+                  if f" {n} " in f" {norm(text)} ":
+                      out.append(ref_names[n])
+              return list(dict.fromkeys(out))
+
+          def structured_communes(detail_body):
+              values = []
+
+              def add_addr(addr, source):
+                  addr = addr or {}
+                  value = clean(
+                      addr.get("descComune")
+                      or addr.get("citta")
+                      or addr.get("comune")
+                  )
+                  if value:
+                      values.append((source, value))
+
+              add_addr(detail_body.get("indirizzo"), "detail.indirizzo")
+
+              for i, bene in enumerate(detail_body.get("beni") or [], start=1):
+                  add_addr((bene or {}).get("indirizzo"), f"detail.beni[{i}]")
+
+              lotto = detail_body.get("lotto") or {}
+              for i, bene in enumerate(lotto.get("beni") or [], start=1):
+                  add_addr((bene or {}).get("indirizzo"), f"lotto.beni[{i}]")
+
+              # Preserve source detail but de-duplicate exact pairs.
+              return list(dict.fromkeys(values))
+
+          def classify(
+              *,
+              current,
+              embedded,
+              provincia,
+              full_description,
+              structured,
+          ):
+              embedded_admin = {
+                  "via": "TEST",
+                  "cap": "00000",
+                  "comune": embedded,
+                  "sigla_provincia": "",
+              }
+
+              # For embedded confirmation, use the same logical description
+              # rule as production but without relying on the synthetic sigla.
+              current_mentioned = builder.description_mentions_comune(
+                  full_description, current
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  full_description, embedded
+              )
+              strong_context = builder.description_has_strong_location_context(
+                  full_description
+              )
+
+              description_db = (
+                  current_mentioned
+                  and not embedded_mentioned
+                  and strong_context
+              )
+              description_embedded = (
+                  embedded_mentioned
+                  and not current_mentioned
+                  and strong_context
+              )
+
+              structured_norms = [norm(v) for _, v in structured if norm(v)]
+              structured_unique = list(dict.fromkeys(structured_norms))
+
+              current_norm = norm(current)
+              embedded_norm = norm(embedded)
+
+              structured_db = (
+                  bool(structured_unique)
+                  and set(structured_unique) == {current_norm}
+              )
+              structured_embedded = (
+                  bool(structured_unique)
+                  and set(structured_unique) == {embedded_norm}
+              )
+
+              third_structured = [
+                  v for v in structured_unique
+                  if v not in {current_norm, embedded_norm}
+              ]
+
+              # Fail closed when independent PVP evidence disagrees.
+              if description_db and structured_embedded:
+                  return "AMBIGUOUS_PVP_CONFLICT"
+              if description_embedded and structured_db:
+                  return "AMBIGUOUS_PVP_CONFLICT"
+
+              if third_structured:
+                  return "THIRD_COMUNE_STRUCTURED"
+
+              # Strong description evidence can resolve the pair as long as
+              # structured evidence does not point to the opposite side.
+              if description_db and not structured_embedded:
+                  return "DB_CONFIRMED"
+              if description_embedded and not structured_db:
+                  return "EMBEDDED_CONFIRMED"
+
+              # If descriptions are inconclusive, unanimous structured fields
+              # can still support one side.
+              if structured_db and not embedded_mentioned:
+                  return "DB_CONFIRMED"
+              if structured_embedded and not current_mentioned:
+                  return "EMBEDDED_CONFIRMED"
+
+              return "AMBIGUOUS"
+
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+          ids = list(CASES)
+
+          params = urlencode({
+              "select": ",".join([
+                  "pvp_id", "status", "comune", "cap", "sigla_provincia",
+                  "provincia", "regione", "indirizzo", "descrizione",
+                  "latitudine", "longitudine", "maps_link",
+                  "geocode_status", "geocode_source", "geocode_precision",
+                  "pvp_latitudine", "pvp_longitudine", "pvp_geo_source",
+              ]),
+              "pvp_id": "in.(" + ",".join(ids) + ")",
+              "order": "pvp_id.asc",
+              "limit": "50",
+          })
+
+          req = Request(base + "/rest/v1/listings?" + params, method="GET")
+          req.add_header("apikey", key)
+          req.add_header("Authorization", "Bearer " + key)
+
+          with urlopen(req, timeout=60) as resp:
+              rows = json.loads(resp.read().decode("utf-8"))
+
+          if not isinstance(rows, list) or len(rows) != len(ids):
+              raise RuntimeError(
+                  f"Expected {len(ids)} REVIEW rows, got "
+                  f"{len(rows) if isinstance(rows, list) else 'non-list'}"
+              )
+
+          by_id = {str(r["pvp_id"]): r for r in rows}
+          missing = [pid for pid in ids if pid not in by_id]
+          if missing:
+              raise RuntimeError("Missing REVIEW ids: " + repr(missing))
+
+          session = requests.Session()
+          preview = []
+
+          for pid in ids:
+              row = by_id[pid]
+              current, embedded = CASES[pid]
+
+              if clean(row.get("comune")) != current:
+                  raise RuntimeError(
+                      f"{pid}: DB comune changed since audit: "
+                      f"{row.get('comune')!r} != {current!r}"
+                  )
+
+              detail = builder.fetch_detail(session, pid)
+              detail_body = detail.get("body") or {}
+              if not detail_body:
+                  raise RuntimeError(f"{pid}: empty live PVP detail body")
+
+              full_description = builder.property_description_text(
+                  {"descLotto": row.get("descrizione")},
+                  detail_body,
+              )
+              structured = structured_communes(detail_body)
+              action = classify(
+                  current=current,
+                  embedded=embedded,
+                  provincia=row.get("provincia"),
+                  full_description=full_description,
+                  structured=structured,
+              )
+
+              current_mentioned = builder.description_mentions_comune(
+                  full_description, current
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  full_description, embedded
+              )
+              strong_context = builder.description_has_strong_location_context(
+                  full_description
+              )
+
+              ref_mentions = reference_communes_mentioned(full_description)
+              third_mentions = [
+                  x for x in ref_mentions
+                  if norm(x) not in {norm(current), norm(embedded)}
+              ]
+
+              structured_values = list(dict.fromkeys(
+                  v for _, v in structured
+              ))
+              third_structured = [
+                  x for x in structured_values
+                  if norm(x) not in {norm(current), norm(embedded)}
+              ]
+
+              preview.append({
+                  "pvp_id": pid,
+                  "classification": action,
+                  "db_comune": current,
+                  "embedded_comune": embedded,
+                  "db_indirizzo": row.get("indirizzo"),
+                  "db_cap": row.get("cap"),
+                  "provincia": row.get("provincia"),
+                  "description_current_mentioned": current_mentioned,
+                  "description_embedded_mentioned": embedded_mentioned,
+                  "strong_location_context": strong_context,
+                  "structured_communes": " || ".join(
+                      f"{src}: {value}" for src, value in structured
+                  ),
+                  "third_structured_communes": " || ".join(third_structured),
+                  "third_description_mentions_diagnostic": " || ".join(
+                      third_mentions
+                  ),
+                  "full_property_description": full_description,
+                  "current_geocode_status": row.get("geocode_status"),
+                  "current_geocode_source": row.get("geocode_source"),
+                  "current_geocode_precision": row.get("geocode_precision"),
+                  "current_latitudine": row.get("latitudine"),
+                  "current_longitudine": row.get("longitudine"),
+                  "current_maps_link": row.get("maps_link"),
+              })
+
+          counts = Counter(x["classification"] for x in preview)
+          stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+          csv_path = OUTDIR / f"historical_review_pvp_only_preview_{stamp}.csv"
+          json_path = OUTDIR / f"historical_review_pvp_only_preview_{stamp}.json"
+
+          with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=list(preview[0]))
+              w.writeheader()
+              w.writerows(preview)
+
+          report = {
+              "mode": "READ_ONLY_NO_WRITES",
+              "source_policy": "PVP_API_RAW_PLUS_DETERMINISTIC_REFERENCE_ONLY",
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "rows": len(preview),
+              "classification_counts": dict(sorted(counts.items())),
+              "rows_detail": preview,
+          }
+
+          json_path.write_text(
+              json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print("[SUMMARY]")
+          print(json.dumps({
+              "mode": report["mode"],
+              "source_policy": report["source_policy"],
+              "rows": report["rows"],
+              "classification_counts": report["classification_counts"],
+          }, ensure_ascii=False, indent=2))
+
+          print()
+          print("[CLASSIFICATIONS]")
+          for rec in preview:
+              print(
+                  f"{rec['pvp_id']}: {rec['db_comune']} vs "
+                  f"{rec['embedded_comune']} => {rec['classification']} | "
+                  f"desc_db={rec['description_current_mentioned']} "
+                  f"desc_emb={rec['description_embedded_mentioned']} "
+                  f"strong={rec['strong_location_context']} | "
+                  f"structured={rec['structured_communes']!r} | "
+                  f"third_desc={rec['third_description_mentions_diagnostic']!r}"
+              )
+
+          print()
+          print("[PASS] 23 REVIEW rows classified read-only from PVP/reference evidence")
+          PY
+
+      - name: Upload preview reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-review-pvp-only-preview-${{ github.run_id }}
+          path: runtime/reports/historical_review_pvp_only_preview_*
+          if-no-files-found: error
+          retention-days: 14
