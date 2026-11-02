@@ -1,0 +1,189 @@
+name: Builder resolver regression preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run full builder regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path.cwd()
+          sys.path.insert(0, str((root / "src").resolve()))
+          sys.path.insert(0, str((root / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as b
+
+          def check(label, actual, expected):
+              if actual != expected:
+                  raise AssertionError(
+                      f"{label} FAILED: expected={expected!r} actual={actual!r}"
+                  )
+              print(f"[PASS] {label}: {actual!r}")
+
+          def row(search_item, detail_body=None):
+              return b.build_listing_row(search_item, detail_body or {})
+
+          # 1) Embedded confirmed by description:
+          #    Vercelli -> Borgosesia must be corrected.
+          borgosesia = row({
+              "id": "TEST-BORGOSESIA",
+              "descLotto": (
+                  "In Borgosesia, alloggio al piano primo dello stabile "
+                  "con accessoria cantina. Il tutto distinto al C.F. del "
+                  "Comune di Borgosesia, via Vittorio Veneto n. 78."
+              ),
+              "indirizzo": {
+                  "via": "Via Vittorio Veneto, 78, 13011 Borgosesia VC",
+                  "numeroCivico": "78",
+                  "cap": "13011",
+                  "citta": "Vercelli",
+                  "provincia": "Vercelli",
+                  "coordinate": {},
+              },
+          })
+
+          check("Borgosesia comune", borgosesia["comune"], "Borgosesia")
+          check("Borgosesia CAP", borgosesia["cap"], "13011")
+          check("Borgosesia sigla", borgosesia["sigla_provincia"], "VC")
+          check(
+              "Borgosesia indirizzo",
+              borgosesia["indirizzo"],
+              "Via Vittorio Veneto, 78, 13011 Borgosesia (VC)",
+          )
+          check(
+              "Borgosesia no duplicate civic",
+              "78 78" in borgosesia["indirizzo"],
+              False,
+          )
+          check(
+              "Borgosesia maps text available",
+              bool(borgosesia["maps_link"]),
+              True,
+          )
+
+          # 2) Ambiguous PVP case:
+          #    Nettuno is embedded, but description does not confirm it.
+          #    Do NOT override Velletri automatically.
+          nettuno = row({
+              "id": "TEST-NETTUNO",
+              "descLotto": "Appartamento e lastrico solare",
+              "indirizzo": {
+                  "via": "Via del Tridente, 39, 00048 Nettuno RM",
+                  "numeroCivico": "39",
+                  "cap": "00048",
+                  "citta": "Velletri",
+                  "provincia": "Roma",
+                  "coordinate": {},
+              },
+          })
+
+          check("Nettuno unresolved keeps DB comune", nettuno["comune"], "Velletri")
+          check(
+              "Nettuno preserves PVP address without hybrid",
+              nettuno["indirizzo"],
+              "Via del Tridente, 39, 00048 Nettuno (RM)",
+          )
+          check("Nettuno no duplicate civic", "39 39" in nettuno["indirizzo"], False)
+          check(
+              "Nettuno ambiguous text maps link disabled",
+              nettuno["maps_link"],
+              None,
+          )
+
+          # 3) Embedded is demonstrably wrong:
+          #    description supports Lisciano Niccone, not Umbertide.
+          lisciano = row({
+              "id": "TEST-LISCIANO",
+              "descLotto": "LISCIANO NICCONE (PG) VIA LISCIANO NICCONE N. 35",
+              "indirizzo": {
+                  "via": "Frazione Niccone, 35, 06019 Umbertide PG",
+                  "numeroCivico": "35",
+                  "cap": "06019",
+                  "citta": "Lisciano Niccone",
+                  "provincia": "Perugia",
+                  "coordinate": {},
+              },
+          })
+
+          check(
+              "Lisciano keeps DB comune",
+              lisciano["comune"],
+              "Lisciano Niccone",
+          )
+          check(
+              "Lisciano preserves original embedded PVP admin in address",
+              lisciano["indirizzo"],
+              "Frazione Niccone, 35, 06019 Umbertide (PG)",
+          )
+          check(
+              "Lisciano ambiguous text maps link disabled",
+              lisciano["maps_link"],
+              None,
+          )
+
+          # 4) Normal address must remain unchanged.
+          normal = row({
+              "id": "TEST-NORMAL",
+              "indirizzo": {
+                  "via": "Via Roma",
+                  "numeroCivico": "12",
+                  "cap": "07026",
+                  "citta": "Olbia",
+                  "provincia": "Sassari",
+                  "coordinate": {},
+              },
+          })
+
+          check("Normal comune", normal["comune"], "Olbia")
+          check(
+              "Normal address",
+              normal["indirizzo"],
+              "Via Roma 12, 07026 Olbia (SS)",
+          )
+          check("Normal maps link available", bool(normal["maps_link"]), True)
+
+          # 5) An unresolved conflict with PVP coordinates:
+          #    textual Maps search stays disabled, but build_maps_link must
+          #    still use the coordinates.
+          nettuno_coords = row({
+              "id": "TEST-NETTUNO-COORDS",
+              "descLotto": "Appartamento e lastrico solare",
+              "indirizzo": {
+                  "via": "Via del Tridente, 39, 00048 Nettuno RM",
+                  "numeroCivico": "39",
+                  "cap": "00048",
+                  "citta": "Velletri",
+                  "provincia": "Roma",
+                  "coordinate": {
+                      "latitudine": 41.45,
+                      "longitudine": 12.66,
+                  },
+              },
+          })
+
+          check(
+              "Ambiguous case still gets coordinate Maps link",
+              nettuno_coords["maps_link"],
+              "https://www.google.com/maps?q=41.45,12.66",
+          )
+
+          print()
+          print("ALL FULL BUILDER REGRESSION CHECKS PASSED")
+          PY
