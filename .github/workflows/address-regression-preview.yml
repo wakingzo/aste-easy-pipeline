@@ -243,6 +243,34 @@ jobs:
               repr(roma.get("maps_link")),
           )
 
+          roma_explicit_cap = builder.build_listing_row(
+              {
+                  "id": "TEST-ROMA-MULTICAP-EXPLICIT",
+                  "descLotto": "Immobile sito nel Comune di Roma.",
+                  "indirizzo": {
+                      "via": "Via Test, 1, 00060 Ponzano Romano RM",
+                      "numeroCivico": "1",
+                      "cap": "00118",
+                      "citta": "Roma",
+                      "provincia": "Roma",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Roma multi-CAP preserves explicit valid current CAP",
+              roma_explicit_cap.get("cap") == "00118",
+              repr(roma_explicit_cap.get("cap")),
+          )
+          check(
+              "Roma explicit valid CAP used in cleaned address",
+              roma_explicit_cap.get("indirizzo")
+              == "Via Test, 1, 00118 Roma (RM)",
+              repr(roma_explicit_cap.get("indirizzo")),
+          )
+
           normal = builder.build_listing_row(
               {
                   "id": "TEST-NORMAL",
