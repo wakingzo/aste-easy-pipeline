@@ -170,6 +170,44 @@ jobs:
                   detail_body,
               )
 
+              live_beni = []
+              live_beni.extend(detail_body.get("beni") or [])
+              live_beni.extend(
+                  (detail_body.get("lotto") or {}).get("beni") or []
+              )
+
+              live_bene_admin = []
+              live_bene_descs = []
+
+              for bene in live_beni:
+                  bene = bene or {}
+                  baddr = bene.get("indirizzo") or {}
+
+                  comune_bene = clean(
+                      baddr.get("descComune")
+                      or baddr.get("citta")
+                      or baddr.get("comune")
+                  )
+                  cap_bene = norm_cap(baddr.get("cap"))
+                  via_bene = clean(baddr.get("via"))
+                  civico_bene = clean(baddr.get("numeroCivico"))
+
+                  if any([comune_bene, cap_bene, via_bene, civico_bene]):
+                      live_bene_admin.append(
+                          " | ".join([
+                              x for x in [
+                                  via_bene,
+                                  civico_bene,
+                                  cap_bene,
+                                  comune_bene,
+                              ] if x
+                          ])
+                      )
+
+                  bene_desc = clean(bene.get("descBene"))
+                  if bene_desc:
+                      live_bene_descs.append(bene_desc)
+
               current_mentioned = builder.description_mentions_comune(
                   full_description, expected_current
               )
@@ -238,6 +276,9 @@ jobs:
                   "description_current_confirmed": current_mentioned,
                   "description_embedded_absent": not embedded_mentioned,
                   "full_property_description": full_description,
+                  "live_beni_count": len(live_beni),
+                  "live_bene_admin": " || ".join(dict.fromkeys(live_bene_admin)),
+                  "live_bene_descs": " || ".join(dict.fromkeys(live_bene_descs)),
                   "current_geocode_status": row.get("geocode_status"),
                   "current_geocode_source": row.get("geocode_source"),
                   "current_geocode_precision": row.get("geocode_precision"),
@@ -294,6 +335,14 @@ jobs:
                   f"{rec['pvp_id']}: {rec['current_indirizzo']} "
                   f"=> {rec['proposed_indirizzo']} "
                   f"[{rec['cap_source']}; {rec['evidence_action']}]"
+              )
+
+          print()
+          print("[LIVE_BENI]")
+          for rec in preview:
+              print(
+                  f"{rec['pvp_id']}: count={rec['live_beni_count']} "
+                  f"admin={rec['live_bene_admin']!r}"
               )
 
           print()
