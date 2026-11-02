@@ -1,0 +1,949 @@
+name: Apply 101 same-comune CAP repairs
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type exactly APPLY_101_CAP_FIXES'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aste-easy-daily-production
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      GOOGLE_GEOCODING_API_KEY: ${{ secrets.GOOGLE_GEOCODING_API_KEY }}
+      GH_TOKEN: ${{ github.token }}
+      ANNCSU_CACHE_KEY: anncsu-sqlite-v1-20260915
+      ISTAT_BOUNDARY_CACHE_KEY: istat-boundaries-2026-v1
+
+    steps:
+      - name: Require explicit confirmation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.confirm }}" != "APPLY_101_CAP_FIXES" ]; then
+            echo "Confirmation mismatch. No changes made." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE GOOGLE_GEOCODING_API_KEY; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing repository secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Create ephemeral container env file
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
+            printf 'SUPABASE_SERVICE_ROLE=%s\n' "$SUPABASE_SERVICE_ROLE"
+            printf 'GOOGLE_GEOCODING_API_KEY=%s\n' "$GOOGLE_GEOCODING_API_KEY"
+          } > .env.container
+
+      - name: Restore ANNCSU runtime index
+        id: anncsu_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: data/anncsu/anncsu_runtime.sqlite3
+          key: ${{ env.ANNCSU_CACHE_KEY }}
+
+      - name: Bootstrap ANNCSU from private release seed
+        if: steps.anncsu_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/anncsu "$RUNNER_TEMP/anncsu-seed"
+          gh release download cloud-seed \
+            --pattern 'anncsu_runtime.sqlite3.part*' \
+            --dir "$RUNNER_TEMP/anncsu-seed"
+          shopt -s nullglob
+          parts=("$RUNNER_TEMP"/anncsu-seed/anncsu_runtime.sqlite3.part*)
+          if [ "${#parts[@]}" -lt 2 ]; then
+            echo "Expected at least two ANNCSU seed parts" >&2
+            exit 1
+          fi
+          cat "${parts[@]}" > data/anncsu/anncsu_runtime.sqlite3
+
+      - name: Verify ANNCSU runtime index
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sqlite3
+          from pathlib import Path
+          p = Path('data/anncsu/anncsu_runtime.sqlite3')
+          expected_size = 2290520064
+          if not p.is_file():
+              raise SystemExit('ANNCSU SQLite missing')
+          if p.stat().st_size != expected_size:
+              raise SystemExit(f'ANNCSU size mismatch: {p.stat().st_size} != {expected_size}')
+          con = sqlite3.connect(f'file:{p.resolve()}?mode=ro', uri=True)
+          try:
+              qc = con.execute('PRAGMA quick_check').fetchone()[0]
+              ver = con.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+              s = con.execute("SELECT value FROM meta WHERE key='strad_rows'").fetchone()[0]
+              i = con.execute("SELECT value FROM meta WHERE key='indir_rows'").fetchone()[0]
+          finally:
+              con.close()
+          if qc != 'ok' or ver != 'anncsu_sqlite_index_v1' or s != '1220962' or i != '27415954':
+              raise SystemExit(
+                  f'ANNCSU verification failed: qc={qc} version={ver} '
+                  f'strad={s} indir={i}'
+              )
+          print('ANNCSU PASS')
+          PY
+
+      - name: Save ANNCSU runtime index cache
+        if: steps.anncsu_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: data/anncsu/anncsu_runtime.sqlite3
+          key: ${{ env.ANNCSU_CACHE_KEY }}
+
+      - name: Restore ISTAT municipality boundaries
+        id: istat_boundary_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            data/reference/Limiti01012026.zip
+            data/reference/istat_confini_2026
+          key: ${{ env.ISTAT_BOUNDARY_CACHE_KEY }}
+
+      - name: Download and extract official ISTAT 2026 boundaries
+        if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/reference
+          curl -fL --retry 3 --retry-delay 5 \
+            -A 'AsteEasy-GitHubActions/1.0' \
+            'https://www.istat.it/storage/cartografia/confini_amministrativi/non_generalizzati/2026/Limiti01012026.zip' \
+            -o data/reference/Limiti01012026.zip
+          python - <<'PY'
+          from pathlib import Path
+          import shutil, zipfile
+          z = Path('data/reference/Limiti01012026.zip')
+          if not zipfile.is_zipfile(z):
+              raise SystemExit('ISTAT boundary download is not a valid ZIP')
+          out = Path('data/reference/istat_confini_2026')
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+          with zipfile.ZipFile(z) as f:
+              f.extractall(out)
+          if not list(out.rglob('*.shp')):
+              raise SystemExit('No SHP found in ISTAT boundary archive')
+          (out / '.extracted_ok').write_text('ok', encoding='utf-8')
+          print('ISTAT boundaries PASS')
+          PY
+
+      - name: Save ISTAT municipality boundaries cache
+        if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            data/reference/Limiti01012026.zip
+            data/reference/istat_confini_2026
+          key: ${{ env.ISTAT_BOUNDARY_CACHE_KEY }}
+
+      - name: Restore mutable Aste Easy state
+        id: runtime_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            runtime-v318-
+
+      - name: Bootstrap mutable state from private release seed
+        if: steps.runtime_restore.outputs.cache-matched-key == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/state-seed"
+          gh release download cloud-seed \
+            --pattern 'aste-easy-state-seed.zip' \
+            --dir "$RUNNER_TEMP/state-seed"
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          zip_path = (
+              pathlib.Path(os.environ["RUNNER_TEMP"])
+              / "state-seed"
+              / "aste-easy-state-seed.zip"
+          )
+          with zipfile.ZipFile(zip_path) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace("\\", "/").lstrip("/")
+                  if not name:
+                      continue
+                  target = pathlib.Path(name)
+                  if info.is_dir() or name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with zf.open(info) as src, open(target, "wb") as dst:
+                      shutil.copyfileobj(src, dst)
+          print("State seed extracted successfully.")
+          PY
+
+      - name: Verify persistent mutable state
+        id: state_verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s runtime/cache/google_geocode_cache_v8.json
+          test -s runtime/cache/google_api_usage_v9_2.json
+          test -s runtime/cache/historical_geocache_v1.sqlite3
+          test -s runtime/state/google_geocoding_usage_v1.json
+          mkdir -p runtime/raw runtime/reports runtime/cache runtime/state runtime/handoff
+          python - <<'PY'
+          import json, sqlite3
+          from pathlib import Path
+          for p in [
+              Path('runtime/cache/google_api_usage_v9_2.json'),
+              Path('runtime/state/google_geocoding_usage_v1.json'),
+          ]:
+              json.loads(p.read_text(encoding='utf-8-sig'))
+          p = Path('runtime/cache/historical_geocache_v1.sqlite3')
+          con = sqlite3.connect(f'file:{p.resolve()}?mode=ro', uri=True)
+          try:
+              qc = con.execute('PRAGMA quick_check').fetchone()[0]
+          finally:
+              con.close()
+          if qc != 'ok':
+              raise SystemExit('Historical geocache quick_check failed')
+          print('Mutable state PASS')
+          PY
+
+      - name: Build production container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose build daily
+
+      - name: Mark repair start
+        shell: bash
+        run: |
+          mkdir -p runtime/reports runtime/upload-repair
+          touch "$RUNNER_TEMP/aste-easy-repair-start"
+
+      - name: Apply guarded repairs and targeted production geocoding
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker compose run --rm -T daily python - <<'PY'
+          import json
+          import math
+          import os
+          import re
+          import sys
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          SRC = Path("/app/src")
+          for p in (SRC, SRC / "importer", SRC / "geocoding", SRC / "pipeline"):
+              if str(p) not in sys.path:
+                  sys.path.insert(0, str(p))
+
+          import build_listings_daily_v3_16 as builder
+          import pvp_import_atomic_v1 as importer
+          import google_production_v3_18 as prod
+
+          REPORTS = Path("/app/runtime/reports")
+          REPORTS.mkdir(parents=True, exist_ok=True)
+
+          BASE = os.environ["SUPABASE_URL"].rstrip("/")
+          KEY = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          def clean(v):
+              return "" if v is None else re.sub(
+                  r"\s+", " ", str(v).replace("\u00a0", " ")
+              ).strip()
+
+          def norm_cap(v):
+              digits = re.sub(r"\D", "", clean(v))
+              if not digits:
+                  return ""
+              return digits.zfill(5) if len(digits) <= 5 else digits
+
+          def norm_sigla(v):
+              return re.sub(r"[^A-Za-z]", "", clean(v)).upper()
+
+          def norm_comune(v):
+              return builder.normalize_admin_match_text(v)
+
+          # Reference indexes from the same deterministic CSV used by production.
+          triples_by_cap = defaultdict(list)
+          valid_norm_triples = set()
+
+          for cap, comune, sigla in builder.VALID_ADMIN_TRIPLES:
+              rec = {
+                  "cap": cap,
+                  "comune": comune,
+                  "comune_norm": norm_comune(comune),
+                  "sigla": sigla,
+              }
+              triples_by_cap[cap].append(rec)
+              valid_norm_triples.add(
+                  (cap, rec["comune_norm"], sigla)
+              )
+
+          def embedded_verified_candidates(address):
+              raw = clean(address)
+              normalized = norm_comune(raw)
+              caps = set(
+                  re.findall(r"(?<!\d)\d{5}(?!\d)", normalized)
+              )
+              found = {}
+
+              for cap in caps:
+                  for rec in triples_by_cap.get(cap, ()):
+                      needle = (
+                          f"{cap} {rec['comune_norm']} "
+                          f"{rec['sigla'].lower()}"
+                      )
+                      if not re.search(
+                          r"(?<![a-z0-9])"
+                          + re.escape(needle)
+                          + r"(?![a-z0-9])",
+                          normalized,
+                      ):
+                          continue
+
+                      cap_match = re.search(
+                          r"(?<!\d)" + re.escape(cap) + r"(?!\d)",
+                          raw,
+                      )
+                      street = (
+                          raw[:cap_match.start()].rstrip(" ,")
+                          if cap_match else ""
+                      )
+                      found[(cap, rec["comune_norm"], rec["sigla"])] = {
+                          **rec,
+                          "via": street,
+                      }
+
+              return list(found.values())
+
+          def request_json(method, url, *, body=None, prefer=None):
+              headers = {
+                  "apikey": KEY,
+                  "Authorization": "Bearer " + KEY,
+                  "Accept": "application/json",
+              }
+              data = None
+              if body is not None:
+                  headers["Content-Type"] = "application/json"
+                  data = json.dumps(
+                      body,
+                      ensure_ascii=False,
+                      separators=(",", ":"),
+                  ).encode("utf-8")
+              if prefer:
+                  headers["Prefer"] = prefer
+
+              req = Request(
+                  url,
+                  method=method,
+                  headers=headers,
+                  data=data,
+              )
+              with urlopen(req, timeout=120) as resp:
+                  raw = resp.read().decode("utf-8")
+                  return json.loads(raw) if raw else None
+
+          def fetch_all_for_detection():
+              fields = [
+                  "pvp_id",
+                  "indirizzo",
+                  "comune",
+                  "cap",
+                  "sigla_provincia",
+                  "provincia",
+              ]
+              rows = []
+              limit = 1000
+              offset = 0
+
+              while True:
+                  params = urlencode({
+                      "select": ",".join(fields),
+                      "order": "pvp_id.asc",
+                      "limit": str(limit),
+                      "offset": str(offset),
+                  })
+                  batch = request_json(
+                      "GET",
+                      BASE + "/rest/v1/listings?" + params,
+                  )
+                  if not isinstance(batch, list):
+                      raise RuntimeError("Unexpected Supabase response")
+                  rows.extend(batch)
+                  if len(batch) < limit:
+                      break
+                  offset += limit
+
+              return rows
+
+          detected = []
+
+          for row in fetch_all_for_detection():
+              candidates = embedded_verified_candidates(
+                  row.get("indirizzo")
+              )
+              if len(candidates) != 1:
+                  continue
+
+              candidate = candidates[0]
+              current_comune = clean(row.get("comune"))
+              current_norm = norm_comune(current_comune)
+              current_cap = norm_cap(row.get("cap"))
+              current_sigla = norm_sigla(
+                  row.get("sigla_provincia")
+              )
+
+              if not current_cap or not current_sigla:
+                  continue
+
+              if current_norm != candidate["comune_norm"]:
+                  continue
+
+              embedded_cap = candidate["cap"]
+              embedded_sigla = candidate["sigla"]
+
+              # Point 4 safe subset only:
+              # same comune, same sigla, different CAP.
+              if current_sigla != embedded_sigla:
+                  continue
+              if current_cap == embedded_cap:
+                  continue
+
+              current_pair_valid = (
+                  current_cap,
+                  current_norm,
+                  current_sigla,
+              ) in valid_norm_triples
+
+              # Leave valid multi-CAP alternatives untouched.
+              if current_pair_valid:
+                  continue
+
+              proposed_address = builder.build_full_property_address(
+                  candidate["via"],
+                  embedded_cap,
+                  current_comune,
+                  current_sigla,
+              )
+
+              detected.append({
+                  "pvp_id": str(row["pvp_id"]),
+                  "current_comune": current_comune,
+                  "current_cap": current_cap,
+                  "current_sigla": current_sigla,
+                  "current_indirizzo": clean(row.get("indirizzo")),
+                  "proposed_cap": embedded_cap,
+                  "proposed_sigla": current_sigla,
+                  "proposed_indirizzo": proposed_address,
+              })
+
+          if len(detected) != 101:
+              raise RuntimeError(
+                  f"Expected exactly 101 safe CAP repairs, got {len(detected)}"
+              )
+
+          ids = [x["pvp_id"] for x in detected]
+          if len(set(ids)) != 101:
+              raise RuntimeError("Duplicate repair IDs detected")
+
+          fixes = {x["pvp_id"]: x for x in detected}
+
+          print("[DETECTED] safe same-comune CAP repairs:", len(ids))
+
+          FIELDS = [
+              "pvp_id",
+              "comune",
+              "cap",
+              "sigla_provincia",
+              "provincia",
+              "regione",
+              "indirizzo",
+              "maps_link",
+              "latitudine",
+              "longitudine",
+              "pvp_latitudine",
+              "pvp_longitudine",
+              "pvp_geo_source",
+              "geocode_status",
+              "geocode_input_hash",
+              "geocode_source",
+              "geocode_precision",
+              "geocode_version",
+              "geocode_checked_at",
+              "geocode_google_outcome",
+              "geocode_decision_reason",
+              "geocode_location_type",
+              "geocode_formatted_address",
+              "geocode_query_used",
+          ]
+
+          CHANGED_FIELDS = [
+              "cap",
+              "indirizzo",
+              "maps_link",
+              "latitudine",
+              "longitudine",
+              "geocode_status",
+              "geocode_input_hash",
+              "geocode_source",
+              "geocode_precision",
+              "geocode_version",
+              "geocode_checked_at",
+              "geocode_google_outcome",
+              "geocode_decision_reason",
+              "geocode_location_type",
+              "geocode_formatted_address",
+              "geocode_query_used",
+          ]
+
+          def fetch_rows():
+              params = urlencode({
+                  "select": ",".join(FIELDS),
+                  "pvp_id": "in.(" + ",".join(ids) + ")",
+                  "order": "pvp_id.asc",
+                  "limit": "150",
+              })
+              rows = request_json(
+                  "GET",
+                  BASE + "/rest/v1/listings?" + params,
+              )
+              if not isinstance(rows, list):
+                  raise RuntimeError("Unexpected Supabase response")
+              by_id = {str(r["pvp_id"]): r for r in rows}
+              if len(by_id) != 101:
+                  raise RuntimeError(
+                      f"Expected 101 target rows, got {len(by_id)}"
+                  )
+              return by_id
+
+          def guarded_patch(pid, f, payload):
+              params = urlencode({
+                  "pvp_id": "eq." + pid,
+                  "comune": "eq." + f["current_comune"],
+                  "cap": "eq." + f["current_cap"],
+                  "sigla_provincia": "eq." + f["current_sigla"],
+                  "indirizzo": "eq." + f["current_indirizzo"],
+              })
+              rows = request_json(
+                  "PATCH",
+                  BASE + "/rest/v1/listings?" + params,
+                  body=payload,
+                  prefer="return=representation",
+              )
+              if not isinstance(rows, list) or len(rows) != 1:
+                  raise RuntimeError(
+                      f"Guarded PATCH did not affect exactly one row: {pid}"
+                  )
+
+          def rollback_patch(pid, original):
+              params = urlencode({"pvp_id": "eq." + pid})
+              payload = {
+                  k: original.get(k)
+                  for k in CHANGED_FIELDS
+              }
+              rows = request_json(
+                  "PATCH",
+                  BASE + "/rest/v1/listings?" + params,
+                  body=payload,
+                  prefer="return=representation",
+              )
+              if not isinstance(rows, list) or len(rows) != 1:
+                  raise RuntimeError("Rollback failed for " + pid)
+
+          stamp = datetime.now(
+              timezone.utc
+          ).strftime("%Y%m%d-%H%M%S")
+
+          before_path = (
+              REPORTS
+              / f"historical_same_comune_cap_apply_before_{stamp}.json"
+          )
+          after_path = (
+              REPORTS
+              / f"historical_same_comune_cap_apply_after_{stamp}.json"
+          )
+          summary_path = (
+              REPORTS
+              / f"historical_same_comune_cap_apply_summary_{stamp}.json"
+          )
+
+          before = fetch_rows()
+
+          for pid in ids:
+              f = fixes[pid]
+              r = before[pid]
+              checks = {
+                  "comune": (
+                      clean(r.get("comune")),
+                      f["current_comune"],
+                  ),
+                  "cap": (
+                      norm_cap(r.get("cap")),
+                      f["current_cap"],
+                  ),
+                  "sigla": (
+                      norm_sigla(r.get("sigla_provincia")),
+                      f["current_sigla"],
+                  ),
+                  "indirizzo": (
+                      clean(r.get("indirizzo")),
+                      f["current_indirizzo"],
+                  ),
+              }
+              bad = {
+                  k: v
+                  for k, v in checks.items()
+                  if v[0] != v[1]
+              }
+              if bad:
+                  raise RuntimeError(
+                      f"Precondition changed for {pid}: {bad}"
+                  )
+
+          before_path.write_text(
+              json.dumps(before, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          preflight = prod.preflight_usage(
+              monthly_cap=9000,
+              run_cap=1,
+              monthly_used_override=None,
+          )
+          remaining = int(preflight.get("remaining") or 0)
+          if remaining < 1:
+              raise RuntimeError(
+                  "No Google monthly budget remaining; aborted before writes"
+              )
+
+          run_cap = min(200, remaining)
+          patched = []
+
+          try:
+              for pid in ids:
+                  f = fixes[pid]
+                  old = before[pid]
+
+                  future = dict(old)
+                  future.update({
+                      "cap": f["proposed_cap"],
+                      "indirizzo": f["proposed_indirizzo"],
+                  })
+                  new_hash = importer.fingerprint(future)
+
+                  payload = {
+                      "cap": f["proposed_cap"],
+                      "indirizzo": f["proposed_indirizzo"],
+                      "maps_link": None,
+                      "latitudine": None,
+                      "longitudine": None,
+                      "geocode_status": "PENDING",
+                      "geocode_input_hash": new_hash,
+                      "geocode_source": None,
+                      "geocode_precision": None,
+                      "geocode_version": None,
+                      "geocode_checked_at": None,
+                      "geocode_google_outcome": None,
+                      "geocode_decision_reason": None,
+                      "geocode_location_type": None,
+                      "geocode_formatted_address": None,
+                      "geocode_query_used": None,
+                  }
+
+                  guarded_patch(pid, f, payload)
+                  patched.append(pid)
+                  print(
+                      f"[PATCHED] {pid}: CAP "
+                      f"{f['current_cap']} -> {f['proposed_cap']}"
+                  )
+
+              pending = fetch_rows()
+
+              for pid in ids:
+                  f = fixes[pid]
+                  r = pending[pid]
+                  if (
+                      norm_cap(r.get("cap")) != f["proposed_cap"]
+                      or clean(r.get("indirizzo"))
+                      != f["proposed_indirizzo"]
+                      or clean(r.get("geocode_status")) != "PENDING"
+                      or r.get("latitudine") is not None
+                      or r.get("longitudine") is not None
+                      or not clean(r.get("geocode_input_hash"))
+                  ):
+                      raise RuntimeError(
+                          "Post-patch verification failed for " + pid
+                      )
+
+              geo = prod.run_for_ids(
+                  ids,
+                  apply=True,
+                  max_rows=len(ids),
+                  monthly_cap=9000,
+                  run_cap=run_cap,
+                  monthly_used_override=None,
+              )
+
+              after = fetch_rows()
+
+              def valid_pair(lat, lon):
+                  try:
+                      a = float(lat)
+                      b = float(lon)
+                  except (TypeError, ValueError):
+                      return False
+                  return (
+                      math.isfinite(a)
+                      and math.isfinite(b)
+                      and -90 <= a <= 90
+                      and -180 <= b <= 180
+                      and not (a == 0 and b == 0)
+                  )
+
+              for pid in ids:
+                  f = fixes[pid]
+                  r = after[pid]
+                  if norm_cap(r.get("cap")) != f["proposed_cap"]:
+                      raise RuntimeError(
+                          "Final CAP verification failed for " + pid
+                      )
+                  if clean(r.get("sigla_provincia")) != f["proposed_sigla"]:
+                      raise RuntimeError(
+                          "Final sigla changed unexpectedly for " + pid
+                      )
+                  if clean(r.get("indirizzo")) != f["proposed_indirizzo"]:
+                      raise RuntimeError(
+                          "Final address verification failed for " + pid
+                      )
+                  if clean(r.get("geocode_status")) == "PENDING":
+                      raise RuntimeError(
+                          "Final geocode still PENDING for " + pid
+                      )
+                  if not valid_pair(
+                      r.get("latitudine"),
+                      r.get("longitudine"),
+                  ):
+                      raise RuntimeError(
+                          "Final coordinates invalid for " + pid
+                      )
+                  if not clean(r.get("maps_link")):
+                      raise RuntimeError(
+                          "Final maps_link missing for " + pid
+                      )
+
+              after_path.write_text(
+                  json.dumps(after, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+
+              summary = {
+                  "result": "PASS",
+                  "repaired": len(ids),
+                  "ids": ids,
+                  "source_policy": (
+                      "SAME_COMUNE_SAME_SIGLA_VERIFIED_PVP_EMBEDDED_CAP"
+                  ),
+                  "preflight": preflight,
+                  "google_run_cap": run_cap,
+                  "geocode_summary": geo,
+                  "before_report": str(before_path),
+                  "after_report": str(after_path),
+                  "rollback_used": False,
+              }
+              summary_path.write_text(
+                  json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8",
+              )
+              print(
+                  "[PASS] 101 same-comune CAP repairs patched "
+                  "and re-geocoded"
+              )
+
+          except Exception as exc:
+              print(
+                  f"[ERROR] {type(exc).__name__}: {exc}",
+                  file=sys.stderr,
+              )
+              rollback_errors = []
+
+              for pid in reversed(patched):
+                  try:
+                      rollback_patch(pid, before[pid])
+                      print(f"[ROLLBACK] restored {pid}")
+                  except Exception as rb_exc:
+                      rollback_errors.append(
+                          f"{pid}: {type(rb_exc).__name__}: {rb_exc}"
+                      )
+
+              rollback_check = fetch_rows()
+              mismatches = []
+
+              for pid in patched:
+                  original = before[pid]
+                  current = rollback_check[pid]
+                  for field in CHANGED_FIELDS:
+                      if current.get(field) != original.get(field):
+                          mismatches.append(f"{pid}:{field}")
+
+              failure_summary = {
+                  "result": (
+                      "ROLLED_BACK"
+                      if not rollback_errors and not mismatches
+                      else "ROLLBACK_INCOMPLETE"
+                  ),
+                  "error_type": type(exc).__name__,
+                  "error": str(exc),
+                  "patched_before_failure": patched,
+                  "rollback_errors": rollback_errors,
+                  "rollback_mismatches": mismatches,
+                  "before_report": str(before_path),
+              }
+              summary_path.write_text(
+                  json.dumps(
+                      failure_summary,
+                      ensure_ascii=False,
+                      indent=2,
+                  ) + "\n",
+                  encoding="utf-8",
+              )
+
+              if rollback_errors or mismatches:
+                  raise RuntimeError(
+                      "Repair failed AND rollback was incomplete: "
+                      + repr(failure_summary)
+                  ) from exc
+
+              raise
+          PY
+
+      - name: Collect repair reports      - name: Collect repair reports
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf runtime/upload-repair
+          mkdir -p runtime/upload-repair
+          if [ -f "$RUNNER_TEMP/aste-easy-repair-start" ] && [ -d runtime/reports ]; then
+            while IFS= read -r -d '' f; do
+              cp --parents "$f" runtime/upload-repair/
+            done < <(
+              find runtime/reports \
+                -type f \
+                -newer "$RUNNER_TEMP/aste-easy-repair-start" \
+                -print0
+            )
+          fi
+          find runtime/upload-repair -type f -printf '%p\n' || true
+
+      - name: Save mutable state for the next run
+        if: always() && steps.state_verify.outcome == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload repair reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-same-comune-cap-apply-${{ github.run_id }}
+          path: runtime/upload-repair/runtime/reports
+          if-no-files-found: warn
+          retention-days: 30
+          compression-level: 6
+
+      - name: Write repair summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          candidates = list(
+              Path("runtime/reports").glob(
+                  "historical_same_comune_cap_apply_summary_*.json"
+              )
+          )
+          if not candidates:
+              raise SystemExit(0)
+
+          p = max(
+              candidates,
+              key=lambda x: x.stat().st_mtime,
+          )
+          obj = json.loads(
+              p.read_text(encoding="utf-8-sig")
+          )
+
+          lines = [
+              "## Historical same-comune CAP repair",
+              "",
+              f"- Result: **{obj.get('result', 'UNKNOWN')}**",
+              f"- Repaired: **{obj.get('repaired', 0)}**",
+              f"- Rollback used: **{obj.get('rollback_used', obj.get('result') != 'PASS')}**",
+          ]
+
+          geo = obj.get("geocode_summary") or {}
+          if geo:
+              lines += [
+                  f"- Google network calls: **{geo.get('google_calls', 0)}**",
+                  f"- Google cache hits: **{geo.get('google_cache_hits', 0)}**",
+                  f"- Map coverage: **{(geo.get('map_coverage') or {}).get('mapped', 0)}/{(geo.get('map_coverage') or {}).get('total', 0)}**",
+              ]
+
+          with open(
+              os.environ["GITHUB_STEP_SUMMARY"],
+              "a",
+              encoding="utf-8",
+          ) as f:
+              f.write("\n".join(lines) + "\n")
+          PY
