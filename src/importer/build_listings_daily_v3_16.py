@@ -572,11 +572,23 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     s_addr = search_item.get("indirizzo") or {}
     s_via = sanitize_text(s_addr.get("via"))
     s_num = sanitize_text(s_addr.get("numeroCivico"))
-    s_via_full = " ".join([x for x in [s_via, s_num] if x]).strip() or s_via
 
     comune = sanitize_text(s_addr.get("citta"))
     provincia = sanitize_text(s_addr.get("provincia"))
     cap = sanitize_text(s_addr.get("cap"))
+
+    # Il PVP a volte inserisce nel campo "via" anche CAP + Comune + sigla,
+    # mentre il campo "citta" contiene un Comune diverso.
+    # Usiamo la coda incorporata solo quando la tripla è verificata
+    # esattamente nel reference locale.
+    embedded_admin = extract_verified_admin_tail(s_via)
+
+    if embedded_admin:
+        s_via = embedded_admin["via"]
+        comune = embedded_admin["comune"]
+        cap = embedded_admin["cap"]
+
+    s_via_full = " ".join([x for x in [s_via, s_num] if x]).strip() or s_via
 
     coords = s_addr.get("coordinate") or {}
     lat = coords.get("latitudine")
@@ -584,7 +596,11 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
 
     geo = lookup_geo(comune, provincia, cap)
     regione = geo.get("regione")
-    sigla_provincia = geo.get("sigla_provincia")
+    sigla_provincia = (
+        embedded_admin["sigla_provincia"]
+        if embedded_admin
+        else geo.get("sigla_provincia")
+    )
     cap = geo.get("cap")
 
     indirizzo_txt = build_full_property_address(s_via_full, cap, comune, sigla_provincia)
