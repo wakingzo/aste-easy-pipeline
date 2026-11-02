@@ -652,6 +652,43 @@ def description_confirms_embedded_admin(
     # e non cita anche il comune originale.
     return embedded_mentioned and not current_mentioned
 
+
+def description_confirms_current_admin(
+    search_item: Dict[str, Any],
+    detail_body: Dict[str, Any],
+    current_comune: Optional[str],
+    embedded_admin: Optional[Dict[str, str]],
+) -> bool:
+    if not embedded_admin or not current_comune:
+        return False
+
+    current_norm = normalize_admin_match_text(current_comune)
+    embedded_norm = normalize_admin_match_text(
+        embedded_admin.get("comune")
+    )
+
+    if not current_norm or not embedded_norm or current_norm == embedded_norm:
+        return False
+
+    text = property_description_text(
+        search_item,
+        detail_body,
+    )
+
+    current_mentioned = description_mentions_comune(
+        text,
+        current_comune,
+    )
+    embedded_mentioned = description_mentions_comune(
+        text,
+        embedded_admin.get("comune"),
+    )
+
+    # Il comune DB è confermato solo quando la descrizione lo cita
+    # esplicitamente e non cita anche il comune embedded.
+    return current_mentioned and not embedded_mentioned
+
+
 def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) -> Dict[str, Any]:
     ann_id = str(search_item.get("id") or detail_body.get("idVendita"))
     link_pvp = DETAIL_PAGE_TMPL.format(id_annuncio=ann_id)
@@ -671,6 +708,13 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     # L'embedded può vincere solo quando il resolver conservativo
     # trova una conferma esplicita nella descrizione del bene/lotto.
     embedded_admin = None
+
+    current_admin_confirmed = description_confirms_current_admin(
+        search_item,
+        detail_body,
+        comune,
+        embedded_admin_candidate,
+    )
 
     if description_confirms_embedded_admin(
         search_item,
@@ -744,7 +788,11 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     # confermato, il conflitto resta intenzionalmente irrisolto.
     embedded_conflict_unresolved = False
 
-    if embedded_admin_candidate and not embedded_admin:
+    if (
+        embedded_admin_candidate
+        and not embedded_admin
+        and not current_admin_confirmed
+    ):
         candidate_comune = normalize_admin_match_text(
             embedded_admin_candidate.get("comune")
         )
