@@ -271,6 +271,34 @@ jobs:
               repr(roma_explicit_cap.get("indirizzo")),
           )
 
+          roma_generic = builder.build_listing_row(
+              {
+                  "id": "TEST-ROMA-GENERIC-TITLE",
+                  "descLotto": "POSTI AUTO E DEPOSITO A ROMA",
+                  "indirizzo": {
+                      "via": "Viale Europa Unita, 00060 Ponzano Romano RM",
+                      "numeroCivico": None,
+                      "cap": None,
+                      "citta": "Roma",
+                      "provincia": "Roma",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Generic Roma title does not resolve admin conflict",
+              roma_generic.get("indirizzo")
+              == "Viale Europa Unita, 00060 Ponzano Romano (RM)",
+              repr(roma_generic.get("indirizzo")),
+          )
+          check(
+              "Generic Roma title keeps text Maps disabled",
+              roma_generic.get("maps_link") is None,
+              repr(roma_generic.get("maps_link")),
+          )
+
           normal = builder.build_listing_row(
               {
                   "id": "TEST-NORMAL",
