@@ -46,6 +46,7 @@ jobs:
           sys.path.insert(0, str((ROOT / "src" / "importer").resolve()))
 
           import build_listings_daily_v3_16 as builder
+          import requests
 
           OUTDIR = ROOT / "runtime" / "reports"
           OUTDIR.mkdir(parents=True, exist_ok=True)
@@ -141,6 +142,7 @@ jobs:
               raise RuntimeError("Missing KEEP_DB ids: " + repr(missing))
 
           preview = []
+          session = requests.Session()
 
           for pid in ids:
               row = by_id[pid]
@@ -153,19 +155,32 @@ jobs:
                   )
 
               desc = clean(row.get("descrizione"))
-              current_mentioned = builder.description_mentions_comune(
-                  desc, expected_current
-              )
-              embedded_mentioned = builder.description_mentions_comune(
-                  desc, expected_embedded
+
+              # Re-fetch live PVP detail read-only so the historical cleanup uses
+              # the same richer description evidence as the production builder,
+              # including descBene, not only the short DB description.
+              detail = builder.fetch_detail(session, pid)
+              detail_body = detail.get("body") or {}
+              if not detail_body:
+                  raise RuntimeError(f"{pid}: empty live PVP detail body")
+
+              full_description = builder.property_description_text(
+                  {"descLotto": desc},
+                  detail_body,
               )
 
-              if not current_mentioned or embedded_mentioned:
-                  raise RuntimeError(
-                      f"{pid}: KEEP_DB evidence changed; "
-                      f"current_mentioned={current_mentioned} "
-                      f"embedded_mentioned={embedded_mentioned}"
-                  )
+              current_mentioned = builder.description_mentions_comune(
+                  full_description, expected_current
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  full_description, expected_embedded
+              )
+
+              evidence_action = (
+                  "KEEP_DB_CONFIRMED"
+                  if current_mentioned and not embedded_mentioned
+                  else "REVIEW"
+              )
 
               street, embedded_cap, embedded_sigla = street_before_embedded(
                   row.get("indirizzo"),
@@ -218,8 +233,10 @@ jobs:
                   "proposed_cap": proposed_cap,
                   "cap_source": cap_source,
                   "proposed_indirizzo": proposed_address,
+                  "evidence_action": evidence_action,
                   "description_current_confirmed": current_mentioned,
                   "description_embedded_absent": not embedded_mentioned,
+                  "full_property_description": full_description,
                   "current_geocode_status": row.get("geocode_status"),
                   "current_geocode_source": row.get("geocode_source"),
                   "current_geocode_precision": row.get("geocode_precision"),
@@ -242,6 +259,7 @@ jobs:
               "created_at_utc": datetime.now(timezone.utc).isoformat(),
               "rows": len(preview),
               "cap_source_counts": {},
+              "evidence_action_counts": {},
               "proposals": preview,
           }
 
@@ -249,6 +267,10 @@ jobs:
               src = rec["cap_source"]
               summary["cap_source_counts"][src] = (
                   summary["cap_source_counts"].get(src, 0) + 1
+              )
+              act = rec["evidence_action"]
+              summary["evidence_action_counts"][act] = (
+                  summary["evidence_action_counts"].get(act, 0) + 1
               )
 
           json_path.write_text(
@@ -261,6 +283,7 @@ jobs:
               "mode": summary["mode"],
               "rows": summary["rows"],
               "cap_source_counts": summary["cap_source_counts"],
+              "evidence_action_counts": summary["evidence_action_counts"],
           }, ensure_ascii=False, indent=2))
 
           print()
@@ -269,7 +292,7 @@ jobs:
               print(
                   f"{rec['pvp_id']}: {rec['current_indirizzo']} "
                   f"=> {rec['proposed_indirizzo']} "
-                  f"[{rec['cap_source']}]"
+                  f"[{rec['cap_source']}; {rec['evidence_action']}]"
               )
 
           print()
