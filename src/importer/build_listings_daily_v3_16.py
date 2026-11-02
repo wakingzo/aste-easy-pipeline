@@ -10,6 +10,7 @@ import requests
 import csv
 import sys
 import re
+import unicodedata
 
 ROOT = Path(__file__).resolve().parent
 SRC_ROOT = ROOT.parent
@@ -564,6 +565,92 @@ def normalize_role(role_code: Optional[str], tokens_text: str) -> Tuple[Optional
         return label.upper().replace(" ", "_"), label, 999
     return None, None, 999
 
+def normalize_admin_match_text(value: Any) -> str:
+    s = sanitize_text(value) or ""
+    s = s.replace("’", "'").replace("`", "'")
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def description_mentions_comune(text: Optional[str], comune: Optional[str]) -> bool:
+    haystack = normalize_admin_match_text(text)
+    needle = normalize_admin_match_text(comune)
+
+    if not haystack or not needle:
+        return False
+
+    return f" {needle} " in f" {haystack} "
+
+
+def property_description_text(
+    search_item: Dict[str, Any],
+    detail_body: Dict[str, Any],
+) -> str:
+    values = []
+
+    for value in [
+        search_item.get("descLotto"),
+        detail_body.get("descLotto"),
+        (detail_body.get("lotto") or {}).get("descLotto"),
+    ]:
+        value = sanitize_text(value)
+        if value:
+            values.append(value)
+
+    lotto = detail_body.get("lotto") or {}
+    for bene in lotto.get("beni") or []:
+        value = sanitize_text((bene or {}).get("descBene"))
+        if value:
+            values.append(value)
+
+    return " ".join(dict.fromkeys(values))
+
+
+def description_confirms_embedded_admin(
+    search_item: Dict[str, Any],
+    detail_body: Dict[str, Any],
+    current_comune: Optional[str],
+    provincia: Optional[str],
+    embedded_admin: Optional[Dict[str, str]],
+) -> bool:
+    if not embedded_admin or not current_comune or not provincia:
+        return False
+
+    current_norm = normalize_admin_match_text(current_comune)
+    embedded_norm = normalize_admin_match_text(embedded_admin.get("comune"))
+
+    if not current_norm or not embedded_norm or current_norm == embedded_norm:
+        return False
+
+    # Fail closed: per ora correggiamo automaticamente solo all'interno
+    # della stessa provincia.
+    province_info = PROVINCE_MAP.get(provincia.lower()) or {}
+    current_sigla = sanitize_text(province_info.get("sigla_provincia"))
+    embedded_sigla = sanitize_text(embedded_admin.get("sigla_provincia"))
+
+    if not current_sigla or not embedded_sigla:
+        return False
+
+    if current_sigla.upper() != embedded_sigla.upper():
+        return False
+
+    text = property_description_text(search_item, detail_body)
+
+    embedded_mentioned = description_mentions_comune(
+        text,
+        embedded_admin.get("comune"),
+    )
+    current_mentioned = description_mentions_comune(
+        text,
+        current_comune,
+    )
+
+    # L'embedded vince SOLO se la descrizione lo cita esplicitamente
+    # e non cita anche il comune originale.
+    return embedded_mentioned and not current_mentioned
 
 def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) -> Dict[str, Any]:
     ann_id = str(search_item.get("id") or detail_body.get("idVendita"))
