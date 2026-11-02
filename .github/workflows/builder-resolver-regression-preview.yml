@@ -128,14 +128,19 @@ jobs:
               "Lisciano Niccone",
           )
           check(
-              "Lisciano preserves original embedded PVP admin in address",
-              lisciano["indirizzo"],
-              "Frazione Niccone, 35, 06019 Umbertide (PG)",
+              "Lisciano unique reference CAP",
+              lisciano["cap"],
+              "06060",
           )
           check(
-              "Lisciano ambiguous text maps link disabled",
-              lisciano["maps_link"],
-              None,
+              "Lisciano cleans wrong embedded PVP admin",
+              lisciano["indirizzo"],
+              "Frazione Niccone, 35, 06060 Lisciano Niccone (PG)",
+          )
+          check(
+              "Lisciano maps link enabled after DB confirmation",
+              bool(lisciano["maps_link"]),
+              True,
           )
 
           # 4) Normal address must remain unchanged.
