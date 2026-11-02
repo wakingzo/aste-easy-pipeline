@@ -1340,6 +1340,7 @@ def _semantic_token_alignment(expected: str, actual: str):
     # (Garibaldi, Marconi, Vittorio). Serve per ammettere abbreviazioni
     # conservative tipo "Guglielmo Marconi" -> "G. Marconi"/"Marconi".
     final_expected_matched = (len(e) - 1) in used_e
+    final_actual_matched = (len(a) - 1) in used_a
 
     return {
         "expected_tokens": e,
@@ -1348,6 +1349,7 @@ def _semantic_token_alignment(expected: str, actual: str):
         "actual_coverage": actual_coverage,
         "avg_match": avg_match,
         "final_expected_matched": final_expected_matched,
+        "final_actual_matched": final_actual_matched,
     }
 
 
@@ -1370,10 +1372,19 @@ def phrase_similarity(expected: str, actual: str):
     a_cov = alignment["actual_coverage"]
     avg = alignment["avg_match"]
     final_matched = alignment["final_expected_matched"]
+    final_actual_matched = alignment["final_actual_matched"]
 
     # Tutti i token attesi sono preservati: consentiamo espansioni ufficiali,
     # es. "Cavour" -> "Camillo Benso Conte di Cavour".
     if e_cov == 1.0:
+        # Se tutti i token attesi sono presenti ma Google aggiunge parole
+        # significative DOPO l'ancora finale, non consideriamo la strada equivalente.
+        #
+        # OK:  "Cavour" -> "Camillo Benso Conte di Cavour"
+        # NO:  "Bruscoli" -> "Bruscoli Tabina"
+        if a_cov < 1.0 and not final_actual_matched:
+            return 0.54
+
         return min(1.0, 0.85 + 0.15 * avg)
 
     # Alias abbreviato: tutti i token del risultato sono contenuti nell'atteso
