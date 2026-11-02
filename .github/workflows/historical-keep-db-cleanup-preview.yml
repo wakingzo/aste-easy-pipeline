@@ -81,7 +81,8 @@ jobs:
 
               # Find a verified CAP + embedded comune + sigla anywhere in the old
               # hybrid address, then preserve everything before that admin tail.
-              for cap, comune_norm, sigla in sorted(builder.VALID_ADMIN_TRIPLES):
+              for cap, comune_ref, sigla in sorted(builder.VALID_ADMIN_TRIPLES):
+                  comune_norm = builder.normalize_admin_match_text(comune_ref)
                   if comune_norm != target:
                       continue
                   needle = f"{cap} {comune_norm} {sigla.lower()}"
