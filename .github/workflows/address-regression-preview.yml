@@ -299,6 +299,88 @@ jobs:
               repr(roma_generic.get("maps_link")),
           )
 
+          same_comune_bad_cap = builder.build_listing_row(
+              {
+                  "id": "TEST-SAME-COMUNE-BAD-CAP",
+                  "descLotto": "Appartamento",
+                  "indirizzo": {
+                      "via": "Via Cristoforo Colombo, 56, 21055 Gorla Minore VA",
+                      "numeroCivico": "56",
+                      "cap": "21100",
+                      "citta": "Gorla Minore",
+                      "provincia": "Varese",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Same-comune invalid CAP replaced by verified embedded CAP",
+              same_comune_bad_cap.get("cap") == "21055",
+              repr(same_comune_bad_cap.get("cap")),
+          )
+          check(
+              "Same-comune invalid CAP gets clean canonical address",
+              same_comune_bad_cap.get("indirizzo")
+              == "Via Cristoforo Colombo, 56, 21055 Gorla Minore (VA)",
+              repr(same_comune_bad_cap.get("indirizzo")),
+          )
+          check(
+              "Same-comune invalid CAP keeps text Maps enabled",
+              bool(same_comune_bad_cap.get("maps_link")),
+              repr(same_comune_bad_cap.get("maps_link")),
+          )
+
+          same_comune_multicap = builder.build_listing_row(
+              {
+                  "id": "TEST-SAME-COMUNE-MULTICAP",
+                  "descLotto": "Appartamento",
+                  "indirizzo": {
+                      "via": "Via Test, 1, 90123 Palermo PA",
+                      "numeroCivico": "1",
+                      "cap": "90141",
+                      "citta": "Palermo",
+                      "provincia": "Palermo",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Same-comune valid multi-CAP preserves current CAP",
+              same_comune_multicap.get("cap") == "90141",
+              repr(same_comune_multicap.get("cap")),
+          )
+          check(
+              "Same-comune valid multi-CAP remains resolved",
+              bool(same_comune_multicap.get("maps_link")),
+              repr(same_comune_multicap.get("maps_link")),
+          )
+
+          sardinia_sigla = builder.build_listing_row(
+              {
+                  "id": "TEST-SARDINIA-SIGLA",
+                  "descLotto": "Appartamento",
+                  "indirizzo": {
+                      "via": "Via Test, 1, 07026 Olbia SS",
+                      "numeroCivico": "1",
+                      "cap": "07026",
+                      "citta": "Olbia",
+                      "provincia": "Gallura Nord-Est Sardegna",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Sardinia sigla mismatch is not auto-resolved",
+              sardinia_sigla.get("maps_link") is None,
+              repr(sardinia_sigla.get("maps_link")),
+          )
+
           normal = builder.build_listing_row(
               {
                   "id": "TEST-NORMAL",
