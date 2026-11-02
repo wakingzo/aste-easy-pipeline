@@ -2,6 +2,13 @@ name: Regression preview - address guards
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/importer/build_listings_daily_v3_16.py"
+      - "src/geocoding/google_geocode_core_v9_3_6.py"
+      - ".github/workflows/address-regression-preview.yml"
 
 permissions:
   contents: read
@@ -178,14 +185,62 @@ jobs:
           )
 
           check(
-              "Lisciano blocks wrong embedded comune",
+              "Lisciano keeps description-confirmed DB comune",
               lisciano.get("comune") == "Lisciano Niccone",
               repr(lisciano.get("comune")),
           )
           check(
-              "Lisciano text Maps disabled on unresolved conflict",
-              lisciano.get("maps_link") is None,
+              "Lisciano replaces embedded CAP with unique DB comune CAP",
+              lisciano.get("cap") == "06060",
+              repr(lisciano.get("cap")),
+          )
+          check(
+              "Lisciano cleans wrong embedded admin from address",
+              lisciano.get("indirizzo")
+              == "Frazione Niccone, 35, 06060 Lisciano Niccone (PG)",
+              repr(lisciano.get("indirizzo")),
+          )
+          check(
+              "Lisciano text Maps enabled after DB confirmation",
+              bool(lisciano.get("maps_link")),
               repr(lisciano.get("maps_link")),
+          )
+
+          roma = builder.build_listing_row(
+              {
+                  "id": "TEST-ROMA-MULTICAP",
+                  "descLotto": "Immobile sito nel Comune di Roma.",
+                  "indirizzo": {
+                      "via": "Via Test, 1, 00060 Ponzano Romano RM",
+                      "numeroCivico": "1",
+                      "cap": "00060",
+                      "citta": "Roma",
+                      "provincia": "Roma",
+                      "coordinate": {},
+                  },
+              },
+              {},
+          )
+
+          check(
+              "Roma keeps description-confirmed DB comune",
+              roma.get("comune") == "Roma",
+              repr(roma.get("comune")),
+          )
+          check(
+              "Roma multi-CAP does not invent replacement CAP",
+              roma.get("cap") is None,
+              repr(roma.get("cap")),
+          )
+          check(
+              "Roma cleans wrong embedded admin without arbitrary CAP",
+              roma.get("indirizzo") == "Via Test, 1, Roma (RM)",
+              repr(roma.get("indirizzo")),
+          )
+          check(
+              "Roma Maps enabled after DB confirmation",
+              bool(roma.get("maps_link")),
+              repr(roma.get("maps_link")),
           )
 
           normal = builder.build_listing_row(
