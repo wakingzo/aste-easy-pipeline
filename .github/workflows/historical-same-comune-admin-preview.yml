@@ -258,6 +258,18 @@ jobs:
               ):
                   continue
 
+              # Reproduce the exact scope of the original 178-row audit:
+              # - a DB CAP was present and differs/is invalid, OR
+              # - the DB province sigla differs from the verified embedded sigla.
+              # Rows whose DB CAP was simply empty and whose sigla already
+              # matched were not part of that historical conflict set.
+              legacy_178_scope = (
+                  bool(current_cap)
+                  or current_sigla != embedded_sigla
+              )
+              if not legacy_178_scope:
+                  continue
+
               refs = ref_by_comune.get(current_norm, [])
               valid_caps = sorted({x["cap"] for x in refs})
               valid_sigle = sorted({
