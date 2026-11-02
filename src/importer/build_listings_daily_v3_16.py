@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 import csv
 import sys
+import re
 
 ROOT = Path(__file__).resolve().parent
 SRC_ROOT = ROOT.parent
@@ -436,7 +437,49 @@ def join_disponibilita(values: Any) -> Optional[str]:
         return ", ".join(vals) if vals else None
     return sanitize_text(values)
 
+def extract_verified_admin_tail(value: Optional[str]) -> Optional[Dict[str, str]]:
+    """Estrae una coda 'CAP Comune SIGLA' solo se confermata dal reference CSV.
 
+    Esempio:
+      'Via del Tridente, 39, 00048 Nettuno RM'
+        -> Via del Tridente, 39 / 00048 / Nettuno / RM
+
+    Fail closed: se la combinazione non è presente in VALID_ADMIN_TRIPLES,
+    restituisce None e l'indirizzo originale non viene modificato.
+    """
+    s = sanitize_text(value)
+    if not s:
+        return None
+
+    m = re.match(
+        r"^(?P<via>.+?)[,\s]+"
+        r"(?P<cap>\d{5})\s+"
+        r"(?P<comune>.+?)\s+"
+        r"\(?(?P<sigla>[A-Za-z]{2})\)?\s*$",
+        s,
+    )
+    if not m:
+        return None
+
+    via = m.group("via").rstrip(" ,")
+    cap = m.group("cap")
+    comune = m.group("comune").strip(" ,")
+    sigla = m.group("sigla").upper()
+
+    if not via:
+        return None
+
+    key = (cap, comune.lower(), sigla)
+    if key not in VALID_ADMIN_TRIPLES:
+        return None
+
+    return {
+        "via": via,
+        "cap": cap,
+        "comune": comune,
+        "sigla_provincia": sigla,
+    }
+    
 def build_full_property_address(via, cap, comune, sigla):
     parts = []
     if via:
