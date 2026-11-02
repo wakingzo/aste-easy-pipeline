@@ -906,6 +906,46 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         else geo.get("cap")
     )
 
+    # Stesso comune + stessa sigla: la coda embedded PVP può risolvere
+    # in modo deterministico solo il CAP.
+    #
+    # - se il CAP corrente è già valido per quel comune, lo conserviamo
+    #   (caso multi-CAP: entrambi possono essere corretti);
+    # - se il CAP corrente non è valido, usiamo il CAP embedded verificato;
+    # - non risolviamo qui differenze di sigla/provincia.
+    same_comune_admin_compatible = False
+
+    if embedded_admin_candidate and not embedded_admin:
+        candidate_comune_norm = normalize_admin_match_text(
+            embedded_admin_candidate.get("comune")
+        )
+        current_comune_norm = normalize_admin_match_text(comune)
+
+        candidate_sigla = (
+            sanitize_text(
+                embedded_admin_candidate.get("sigla_provincia")
+            ) or ""
+        ).upper()
+        current_sigla = (
+            sanitize_text(sigla_provincia) or ""
+        ).upper()
+
+        if (
+            candidate_comune_norm
+            and candidate_comune_norm == current_comune_norm
+            and candidate_sigla
+            and candidate_sigla == current_sigla
+        ):
+            if reference_cap_is_valid_for_comune(
+                cap,
+                comune,
+                provincia,
+            ):
+                same_comune_admin_compatible = True
+            else:
+                cap = embedded_admin_candidate.get("cap")
+                same_comune_admin_compatible = True
+
     # Dopo la risoluzione confrontiamo l'amministrazione scelta con quella
     # incorporata nel campo "via". Se differiscono e l'embedded non è stato
     # confermato, il conflitto resta intenzionalmente irrisolto.
@@ -915,6 +955,7 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         embedded_admin_candidate
         and not embedded_admin
         and not current_admin_confirmed
+        and not same_comune_admin_compatible
     ):
         candidate_comune = normalize_admin_match_text(
             embedded_admin_candidate.get("comune")
