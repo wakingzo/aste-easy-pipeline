@@ -180,7 +180,7 @@ def load_geo_maps():
     prov_acc = {}
 
     with open(COMUNI_CSV, "r", encoding="utf-8-sig", errors="ignore", newline="") as f:
-        reader = csv.DictReader(f)
+        reader = csv.DictReader(f, delimiter=";")
         for row in reader:
             keys = {str(k).strip().lower(): (v.strip() if isinstance(v, str) else v) for k, v in row.items()}
 
@@ -189,7 +189,10 @@ def load_geo_maps():
             regione = keys.get("regione") or keys.get("descregione")
             sigla = keys.get("sigla_provincia") or keys.get("siglaprovincia") or keys.get("sigla")
             cap = keys.get("cap")
-
+            if cap:
+                cap_digits = "".join(ch for ch in str(cap) if ch.isdigit())
+                if 1 <= len(cap_digits) <= 5:
+                    cap = cap_digits.zfill(5)
             if comune and provincia:
                 comune_prov_map[(comune.lower(), provincia.lower())] = {
                     "cap": cap or None,
