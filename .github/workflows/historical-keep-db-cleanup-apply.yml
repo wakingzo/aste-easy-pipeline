@@ -269,6 +269,7 @@ jobs:
           import math
           import os
           import sys
+          import requests
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlencode
@@ -281,14 +282,21 @@ jobs:
 
           import pvp_import_atomic_v1 as importer
           import google_production_v3_18 as prod
+          import build_listings_daily_v3_16 as builder
 
           REPORTS = Path("/app/runtime/reports")
           REPORTS.mkdir(parents=True, exist_ok=True)
 
+          # SOURCE POLICY:
+          # Proposed values below come only from PVP API/raw evidence plus the
+          # deterministic comuni/CAP reference. No web or AI-derived address
+          # information is allowed in this repair.
           FIXES = [
               {
                   "pvp_id": "4618516",
                   "current_comune": "Lisciano Niccone",
+                  "embedded_comune": "Umbertide",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "06019",
                   "current_sigla": "PG",
                   "provincia": "Perugia",
@@ -296,11 +304,13 @@ jobs:
                   "proposed_comune": "Lisciano Niccone",
                   "proposed_cap": "06060",
                   "proposed_sigla": "PG",
-                  "proposed_indirizzo": "Via Lisciano Niccone, 35, 06060 Lisciano Niccone (PG)",
+                  "proposed_indirizzo": "Frazione Niccone, 35, 06060 Lisciano Niccone (PG)",
               },
               {
                   "pvp_id": "4618703",
                   "current_comune": "Marsciano",
+                  "embedded_comune": "Perugia",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "06126",
                   "current_sigla": "PG",
                   "provincia": "Perugia",
@@ -313,6 +323,8 @@ jobs:
               {
                   "pvp_id": "4625939",
                   "current_comune": "Gorla Minore",
+                  "embedded_comune": "Gorla Maggiore",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "21100",
                   "current_sigla": "VA",
                   "provincia": "Varese",
@@ -320,11 +332,13 @@ jobs:
                   "proposed_comune": "Gorla Minore",
                   "proposed_cap": "21055",
                   "proposed_sigla": "VA",
-                  "proposed_indirizzo": "Via Ambrogio Colombo, 56, 21055 Gorla Minore (VA)",
+                  "proposed_indirizzo": "Via Cristoforo Colombo, 56, 21055 Gorla Minore (VA)",
               },
               {
                   "pvp_id": "4632082",
                   "current_comune": "Ferrere",
+                  "embedded_comune": "Torino",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "",
                   "current_sigla": "AT",
                   "provincia": "Asti",
@@ -332,11 +346,13 @@ jobs:
                   "proposed_comune": "Ferrere",
                   "proposed_cap": "14012",
                   "proposed_sigla": "AT",
-                  "proposed_indirizzo": "14012 Ferrere (AT)",
+                  "proposed_indirizzo": "Ferrere, 14012 Ferrere (AT)",
               },
               {
                   "pvp_id": "4632551",
                   "current_comune": "Marcianise",
+                  "embedded_comune": "Santa Maria Capua Vetere",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "",
                   "current_sigla": "CE",
                   "provincia": "Caserta",
@@ -349,6 +365,8 @@ jobs:
               {
                   "pvp_id": "4634141",
                   "current_comune": "Montesilvano",
+                  "embedded_comune": "Pescara",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "",
                   "current_sigla": "PE",
                   "provincia": "Pescara",
@@ -356,11 +374,13 @@ jobs:
                   "proposed_comune": "Montesilvano",
                   "proposed_cap": "65015",
                   "proposed_sigla": "PE",
-                  "proposed_indirizzo": "Via Savonarola, 4, 65015 Montesilvano (PE)",
+                  "proposed_indirizzo": "Via Savonarola, 24, 65015 Montesilvano (PE)",
               },
               {
                   "pvp_id": "4636728",
                   "current_comune": "Volpeglino",
+                  "embedded_comune": "Viguzzolo",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "15050",
                   "current_sigla": "AL",
                   "provincia": "Alessandria",
@@ -373,6 +393,8 @@ jobs:
               {
                   "pvp_id": "4636941",
                   "current_comune": "Castelfidardo",
+                  "embedded_comune": "Camerano",
+                  "evidence_mode": "DESCRIPTION_CURRENT",
                   "current_cap": "",
                   "current_sigla": "AN",
                   "provincia": "Ancona",
@@ -385,6 +407,8 @@ jobs:
               {
                   "pvp_id": "4645530",
                   "current_comune": "Gradisca d'Isonzo",
+                  "embedded_comune": "Farra d'Isonzo",
+                  "evidence_mode": "STRUCTURED_CURRENT",
                   "current_cap": "",
                   "current_sigla": "GO",
                   "provincia": "Gorizia",
@@ -410,6 +434,7 @@ jobs:
               "provincia",
               "regione",
               "indirizzo",
+              "descrizione",
               "maps_link",
               "latitudine",
               "longitudine",
@@ -611,6 +636,101 @@ jobs:
               encoding="utf-8",
           )
 
+          # PVP-only source validation BEFORE DB writes.
+          # This deliberately excludes web/AI evidence.
+          pvp_session = requests.Session()
+          pvp_evidence = {}
+
+          def structured_communes(detail_body):
+              out = []
+
+              def add_addr(addr):
+                  addr = addr or {}
+                  value = (
+                      addr.get("descComune")
+                      or addr.get("citta")
+                      or addr.get("comune")
+                  )
+                  value = str(value or "").strip()
+                  if value:
+                      out.append(value)
+
+              add_addr(detail_body.get("indirizzo"))
+
+              beni = []
+              beni.extend(detail_body.get("beni") or [])
+              beni.extend((detail_body.get("lotto") or {}).get("beni") or [])
+
+              for bene in beni:
+                  add_addr((bene or {}).get("indirizzo"))
+
+              return list(dict.fromkeys(out))
+
+          for pid in IDS:
+              f = FIX_BY_ID[pid]
+              detail = builder.fetch_detail(pvp_session, pid)
+              detail_body = detail.get("body") or {}
+
+              if not detail_body:
+                  raise RuntimeError(
+                      f"{pid}: empty live PVP detail body"
+                  )
+
+              full_description = builder.property_description_text(
+                  {"descLotto": before[pid].get("descrizione")},
+                  detail_body,
+              )
+
+              current_mentioned = builder.description_mentions_comune(
+                  full_description,
+                  f["current_comune"],
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  full_description,
+                  f["embedded_comune"],
+              )
+              strong_context = builder.description_has_strong_location_context(
+                  full_description
+              )
+
+              structured = structured_communes(detail_body)
+              structured_norm = {
+                  builder.normalize_admin_match_text(x)
+                  for x in structured
+              }
+              current_norm = builder.normalize_admin_match_text(
+                  f["current_comune"]
+              )
+
+              if f["evidence_mode"] == "DESCRIPTION_CURRENT":
+                  evidence_ok = (
+                      current_mentioned
+                      and not embedded_mentioned
+                      and strong_context
+                  )
+              elif f["evidence_mode"] == "STRUCTURED_CURRENT":
+                  evidence_ok = current_norm in structured_norm
+              else:
+                  raise RuntimeError(
+                      f"{pid}: unknown evidence mode "
+                      f"{f['evidence_mode']!r}"
+                  )
+
+              pvp_evidence[pid] = {
+                  "mode": f["evidence_mode"],
+                  "current_mentioned": current_mentioned,
+                  "embedded_mentioned": embedded_mentioned,
+                  "strong_location_context": strong_context,
+                  "structured_communes": structured,
+                  "evidence_ok": evidence_ok,
+              }
+
+              if not evidence_ok:
+                  raise RuntimeError(
+                      f"{pid}: PVP-only evidence precondition failed: "
+                      f"{pvp_evidence[pid]!r}"
+                  )
+
           # Network-free Google/account readiness check BEFORE DB writes.
           preflight = prod.preflight_usage(
               monthly_cap=9000,
@@ -778,6 +898,8 @@ jobs:
                   "repaired": len(IDS),
                   "ids": IDS,
                   "preflight": preflight,
+                  "pvp_source_policy": "PVP_API_RAW_PLUS_DETERMINISTIC_REFERENCE_ONLY",
+                  "pvp_evidence": pvp_evidence,
                   "google_run_cap": run_cap,
                   "geocode_summary": geo,
                   "before_report": str(before_path),
