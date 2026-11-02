@@ -1,0 +1,285 @@
+name: Historical KEEP_DB cleanup preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/historical-keep-db-cleanup-preview.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build read-only KEEP_DB cleanup preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          ROOT = Path.cwd()
+          sys.path.insert(0, str((ROOT / "src").resolve()))
+          sys.path.insert(0, str((ROOT / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as builder
+
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          EXPECTED = {
+              "4618516": ("Lisciano Niccone", "Umbertide"),
+              "4618703": ("Marsciano", "Perugia"),
+              "4625939": ("Gorla Minore", "Gorla Maggiore"),
+              "4632082": ("Ferrere", "Torino"),
+              "4632551": ("Marcianise", "Santa Maria Capua Vetere"),
+              "4634141": ("Montesilvano", "Pescara"),
+              "4636728": ("Volpeglino", "Viguzzolo"),
+              "4636941": ("Castelfidardo", "Camerano"),
+              "4643975": ("Roma", "Ponzano Romano"),
+              "4645530": ("Gradisca d'Isonzo", "Farra d'Isonzo"),
+          }
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(r"\s+", " ", str(v).replace("\u00a0", " ")).strip()
+
+          def norm_cap(v):
+              digits = re.sub(r"\D", "", clean(v))
+              if not digits:
+                  return ""
+              return digits.zfill(5) if len(digits) <= 5 else digits
+
+          def street_before_embedded(address, embedded_comune):
+              raw = clean(address)
+              n = builder.normalize_admin_match_text(raw)
+              target = builder.normalize_admin_match_text(embedded_comune)
+
+              # Find a verified CAP + embedded comune + sigla anywhere in the old
+              # hybrid address, then preserve everything before that admin tail.
+              for cap, comune_norm, sigla in sorted(builder.VALID_ADMIN_TRIPLES):
+                  if comune_norm != target:
+                      continue
+                  needle = f"{cap} {comune_norm} {sigla.lower()}"
+                  m_norm = re.search(
+                      r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])",
+                      n,
+                  )
+                  if not m_norm:
+                      continue
+
+                  m_raw = re.search(
+                      r"(?<!\d)" + re.escape(cap) + r"(?!\d)",
+                      raw,
+                  )
+                  if not m_raw:
+                      continue
+
+                  return raw[:m_raw.start()].rstrip(" ,"), cap, sigla
+
+              return "", "", ""
+
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          ids = list(EXPECTED)
+          params = urlencode({
+              "select": ",".join([
+                  "pvp_id", "status", "comune", "cap", "sigla_provincia",
+                  "provincia", "regione", "indirizzo", "descrizione",
+                  "latitudine", "longitudine", "maps_link",
+                  "geocode_status", "geocode_source", "geocode_precision",
+                  "geocode_input_hash", "pvp_latitudine", "pvp_longitudine",
+                  "pvp_geo_source",
+              ]),
+              "pvp_id": "in.(" + ",".join(ids) + ")",
+              "order": "pvp_id.asc",
+              "limit": "20",
+          })
+
+          req = Request(base + "/rest/v1/listings?" + params, method="GET")
+          req.add_header("apikey", key)
+          req.add_header("Authorization", "Bearer " + key)
+
+          with urlopen(req, timeout=60) as resp:
+              rows = json.loads(resp.read().decode("utf-8"))
+
+          if not isinstance(rows, list) or len(rows) != len(ids):
+              raise RuntimeError(
+                  f"Expected {len(ids)} KEEP_DB rows, got "
+                  f"{len(rows) if isinstance(rows, list) else 'non-list'}"
+              )
+
+          by_id = {str(r["pvp_id"]): r for r in rows}
+          missing = [pid for pid in ids if pid not in by_id]
+          if missing:
+              raise RuntimeError("Missing KEEP_DB ids: " + repr(missing))
+
+          preview = []
+
+          for pid in ids:
+              row = by_id[pid]
+              expected_current, expected_embedded = EXPECTED[pid]
+
+              if clean(row.get("comune")) != expected_current:
+                  raise RuntimeError(
+                      f"{pid}: current comune changed: "
+                      f"{row.get('comune')!r} != {expected_current!r}"
+                  )
+
+              desc = clean(row.get("descrizione"))
+              current_mentioned = builder.description_mentions_comune(
+                  desc, expected_current
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  desc, expected_embedded
+              )
+
+              if not current_mentioned or embedded_mentioned:
+                  raise RuntimeError(
+                      f"{pid}: KEEP_DB evidence changed; "
+                      f"current_mentioned={current_mentioned} "
+                      f"embedded_mentioned={embedded_mentioned}"
+                  )
+
+              street, embedded_cap, embedded_sigla = street_before_embedded(
+                  row.get("indirizzo"),
+                  expected_embedded,
+              )
+
+              if not street or not embedded_cap:
+                  raise RuntimeError(
+                      f"{pid}: unable to isolate historical embedded admin tail"
+                  )
+
+              current_cap = norm_cap(row.get("cap"))
+
+              if builder.reference_cap_is_valid_for_comune(
+                  current_cap,
+                  expected_current,
+                  row.get("provincia"),
+              ):
+                  proposed_cap = current_cap
+                  cap_source = "EXPLICIT_VALID_CURRENT_CAP"
+              else:
+                  proposed_cap = (
+                      builder.unique_reference_cap(
+                          expected_current,
+                          row.get("provincia"),
+                      )
+                      or ""
+                  )
+                  cap_source = (
+                      "UNIQUE_REFERENCE_CAP"
+                      if proposed_cap
+                      else "NO_SAFE_CAP_MULTI_OR_UNKNOWN"
+                  )
+
+              proposed_address = builder.build_full_property_address(
+                  street,
+                  proposed_cap or None,
+                  expected_current,
+                  row.get("sigla_provincia"),
+              )
+
+              preview.append({
+                  "pvp_id": pid,
+                  "current_comune": expected_current,
+                  "embedded_comune_to_remove": expected_embedded,
+                  "current_indirizzo": row.get("indirizzo"),
+                  "street_preserved": street,
+                  "current_cap": current_cap,
+                  "embedded_cap": embedded_cap,
+                  "proposed_cap": proposed_cap,
+                  "cap_source": cap_source,
+                  "proposed_indirizzo": proposed_address,
+                  "description_current_confirmed": current_mentioned,
+                  "description_embedded_absent": not embedded_mentioned,
+                  "current_geocode_status": row.get("geocode_status"),
+                  "current_geocode_source": row.get("geocode_source"),
+                  "current_geocode_precision": row.get("geocode_precision"),
+                  "current_latitudine": row.get("latitudine"),
+                  "current_longitudine": row.get("longitudine"),
+                  "current_maps_link": row.get("maps_link"),
+              })
+
+          stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+          csv_path = OUTDIR / f"historical_keep_db_cleanup_preview_{stamp}.csv"
+          json_path = OUTDIR / f"historical_keep_db_cleanup_preview_{stamp}.json"
+
+          with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=list(preview[0]))
+              w.writeheader()
+              w.writerows(preview)
+
+          summary = {
+              "mode": "READ_ONLY_NO_WRITES",
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "rows": len(preview),
+              "cap_source_counts": {},
+              "proposals": preview,
+          }
+
+          for rec in preview:
+              src = rec["cap_source"]
+              summary["cap_source_counts"][src] = (
+                  summary["cap_source_counts"].get(src, 0) + 1
+              )
+
+          json_path.write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print("[SUMMARY]")
+          print(json.dumps({
+              "mode": summary["mode"],
+              "rows": summary["rows"],
+              "cap_source_counts": summary["cap_source_counts"],
+          }, ensure_ascii=False, indent=2))
+
+          print()
+          print("[PROPOSALS]")
+          for rec in preview:
+              print(
+                  f"{rec['pvp_id']}: {rec['current_indirizzo']} "
+                  f"=> {rec['proposed_indirizzo']} "
+                  f"[{rec['cap_source']}]"
+              )
+
+          print()
+          print("[PASS] 10 KEEP_DB cleanup proposals built; zero writes")
+          PY
+
+      - name: Upload preview reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-keep-db-cleanup-preview-${{ github.run_id }}
+          path: runtime/reports/historical_keep_db_cleanup_preview_*
+          if-no-files-found: error
+          retention-days: 14
