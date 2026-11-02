@@ -860,7 +860,7 @@ jobs:
               raise
           PY
 
-      - name: Collect repair reports      - name: Collect repair reports
+      - name: Collect repair reports
         if: always()
         shell: bash
         run: |
