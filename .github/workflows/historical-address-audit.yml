@@ -1,0 +1,288 @@
+name: Historical address admin audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Scan all listings - read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import unicodedata
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          ROOT = Path.cwd()
+          REF = ROOT / "data" / "reference" / "comuni_cap.csv"
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          if not REF.is_file():
+              raise RuntimeError(f"Missing reference file: {REF}")
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(r"\s+", " ", str(v).replace("\u00a0", " ")).strip()
+
+          def norm_text(v):
+              s = clean(v).replace("’", "'").replace("`", "'")
+              s = unicodedata.normalize("NFKD", s)
+              s = "".join(ch for ch in s if not unicodedata.combining(ch))
+              s = s.lower()
+              s = re.sub(r"[^a-z0-9]+", " ", s)
+              return re.sub(r"\s+", " ", s).strip()
+
+          def norm_cap(v):
+              d = re.sub(r"\D", "", clean(v))
+              if not d:
+                  return ""
+              return d.zfill(5) if len(d) <= 5 else d
+
+          def norm_sigla(v):
+              return re.sub(r"[^A-Za-z]", "", clean(v)).upper()
+
+          # Load every valid CAP + Comune + sigla combination.
+          triples_by_cap = defaultdict(list)
+          with REF.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+              reader = csv.DictReader(f, delimiter=";")
+              for row in reader:
+                  comune = clean(row.get("comune"))
+                  cap = norm_cap(row.get("cap"))
+                  sigla = norm_sigla(row.get("sigla_provincia"))
+                  if not comune or not cap or len(sigla) != 2:
+                      continue
+                  triples_by_cap[cap].append({
+                      "cap": cap,
+                      "comune": comune,
+                      "comune_norm": norm_text(comune),
+                      "sigla": sigla,
+                  })
+
+          def embedded_verified_triples(address):
+              n = norm_text(address)
+              caps = set(re.findall(r"(?<!\d)\d{5}(?!\d)", n))
+              found = {}
+              for cap in caps:
+                  for rec in triples_by_cap.get(cap, ()):
+                      # norm_text() turns punctuation/parentheses/apostrophes into spaces.
+                      needle = f"{cap} {rec['comune_norm']} {rec['sigla'].lower()}"
+                      if re.search(r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])", n):
+                          key = (rec["cap"], rec["comune_norm"], rec["sigla"])
+                          found[key] = rec
+              return sorted(found.values(), key=lambda x: (x["cap"], x["comune_norm"], x["sigla"]))
+
+          # Read ALL listings from Supabase. GET only: no PATCH/POST/DELETE.
+          fields = [
+              "pvp_id", "status", "indirizzo", "comune", "cap",
+              "sigla_provincia", "provincia", "regione",
+              "geocode_status", "geocode_source", "geocode_precision",
+              "latitudine", "longitudine",
+          ]
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          rows = []
+          page_size = 1000
+          offset = 0
+          while True:
+              params = urlencode({
+                  "select": ",".join(fields),
+                  "order": "pvp_id.asc",
+                  "limit": str(page_size),
+                  "offset": str(offset),
+              })
+              req = Request(base + "/rest/v1/listings?" + params, method="GET")
+              req.add_header("apikey", key)
+              req.add_header("Authorization", "Bearer " + key)
+              with urlopen(req, timeout=60) as resp:
+                  batch = json.loads(resp.read().decode("utf-8"))
+              if not isinstance(batch, list):
+                  raise RuntimeError("Unexpected Supabase response")
+              rows.extend(batch)
+              print(f"[FETCH] offset={offset:,} rows={len(batch):,} total={len(rows):,}")
+              if len(batch) < page_size:
+                  break
+              offset += page_size
+
+          conflicts = []
+          multiples = []
+          matches = []
+          missing_admin = []
+          no_triple = 0
+          status_counter = Counter()
+          conflict_status = Counter()
+
+          for row in rows:
+              status_counter[clean(row.get("status")) or "(blank)"] += 1
+              hits = embedded_verified_triples(row.get("indirizzo"))
+
+              if not hits:
+                  no_triple += 1
+                  continue
+
+              current_comune = norm_text(row.get("comune"))
+              current_cap = norm_cap(row.get("cap"))
+              current_sigla = norm_sigla(row.get("sigla_provincia"))
+
+              # Distinct canonical triples only.
+              if len(hits) > 1:
+                  multiples.append({
+                      "pvp_id": row.get("pvp_id"),
+                      "status": row.get("status"),
+                      "indirizzo": row.get("indirizzo"),
+                      "row_comune": row.get("comune"),
+                      "row_cap": row.get("cap"),
+                      "row_sigla": row.get("sigla_provincia"),
+                      "verified_triples": " | ".join(
+                          f"{x['cap']} {x['comune']} {x['sigla']}" for x in hits
+                      ),
+                      "geocode_status": row.get("geocode_status"),
+                      "geocode_source": row.get("geocode_source"),
+                  })
+                  continue
+
+              hit = hits[0]
+              same_comune = current_comune == hit["comune_norm"]
+              same_cap = (not current_cap) or current_cap == hit["cap"]
+              same_sigla = (not current_sigla) or current_sigla == hit["sigla"]
+
+              rec = {
+                  "pvp_id": row.get("pvp_id"),
+                  "status": row.get("status"),
+                  "indirizzo": row.get("indirizzo"),
+                  "row_comune": row.get("comune"),
+                  "row_cap": row.get("cap"),
+                  "row_sigla": row.get("sigla_provincia"),
+                  "row_provincia": row.get("provincia"),
+                  "row_regione": row.get("regione"),
+                  "embedded_comune": hit["comune"],
+                  "embedded_cap": hit["cap"],
+                  "embedded_sigla": hit["sigla"],
+                  "geocode_status": row.get("geocode_status"),
+                  "geocode_source": row.get("geocode_source"),
+                  "geocode_precision": row.get("geocode_precision"),
+                  "latitudine": row.get("latitudine"),
+                  "longitudine": row.get("longitudine"),
+              }
+
+              if not current_comune:
+                  rec["reason"] = "ROW_COMUNE_MISSING"
+                  missing_admin.append(rec)
+              elif same_comune and same_cap and same_sigla:
+                  rec["reason"] = "ADMIN_MATCH"
+                  matches.append(rec)
+              elif not same_comune:
+                  rec["reason"] = "VERIFIED_EMBEDDED_COMUNE_CONFLICT"
+                  conflicts.append(rec)
+                  conflict_status[clean(row.get("status")) or "(blank)"] += 1
+              else:
+                  rec["reason"] = "SAME_COMUNE_CAP_OR_SIGLA_CONFLICT"
+                  conflicts.append(rec)
+                  conflict_status[clean(row.get("status")) or "(blank)"] += 1
+
+          stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+          def write_csv(path, records):
+              cols = []
+              for rec in records:
+                  for k in rec:
+                      if k not in cols:
+                          cols.append(k)
+              with path.open("w", encoding="utf-8-sig", newline="") as f:
+                  if not cols:
+                      f.write("")
+                      return
+                  w = csv.DictWriter(f, fieldnames=cols)
+                  w.writeheader()
+                  w.writerows(records)
+
+          conflict_csv = OUTDIR / f"historical_address_conflicts_{stamp}.csv"
+          multiple_csv = OUTDIR / f"historical_address_multiple_triples_{stamp}.csv"
+          match_csv = OUTDIR / f"historical_address_matches_{stamp}.csv"
+          missing_csv = OUTDIR / f"historical_address_missing_admin_{stamp}.csv"
+
+          write_csv(conflict_csv, conflicts)
+          write_csv(multiple_csv, multiples)
+          write_csv(match_csv, matches)
+          write_csv(missing_csv, missing_admin)
+
+          summary = {
+              "mode": "READ_ONLY_NO_WRITES",
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "total_rows": len(rows),
+              "status_counts": dict(status_counter),
+              "rows_without_verified_embedded_triple": no_triple,
+              "rows_single_verified_triple_match": len(matches),
+              "rows_single_verified_triple_conflict": len(conflicts),
+              "rows_multiple_verified_triples": len(multiples),
+              "rows_missing_current_comune_with_verified_triple": len(missing_admin),
+              "conflicts_by_status": dict(conflict_status),
+              "files": {
+                  "conflicts_csv": conflict_csv.name,
+                  "multiple_triples_csv": multiple_csv.name,
+                  "matches_csv": match_csv.name,
+                  "missing_admin_csv": missing_csv.name,
+              },
+              "sample_conflicts": conflicts[:20],
+              "sample_multiple_triples": multiples[:20],
+          }
+
+          summary_path = OUTDIR / f"historical_address_audit_{stamp}.json"
+          summary_path.write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print()
+          print("[SUMMARY]")
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as f:
+                  f.write("## Historical address admin audit\n\n")
+                  f.write(f"- Total listings scanned: **{len(rows):,}**\n")
+                  f.write(f"- Verified embedded triple, current admin matches: **{len(matches):,}**\n")
+                  f.write(f"- Verified embedded triple conflicts: **{len(conflicts):,}**\n")
+                  f.write(f"- Multiple verified triples (manual review): **{len(multiples):,}**\n")
+                  f.write(f"- Current comune missing but verified triple present: **{len(missing_admin):,}**\n")
+                  f.write(f"- No verified embedded triple: **{no_triple:,}**\n\n")
+                  f.write("**Read-only:** no Supabase writes and no Google calls.\n")
+
+          print(f"[REPORT] {summary_path}")
+          PY
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-address-admin-audit-${{ github.run_id }}
+          path: runtime/reports/historical_address_*
+          if-no-files-found: error
+          retention-days: 14
