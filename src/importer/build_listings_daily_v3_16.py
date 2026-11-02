@@ -196,8 +196,8 @@ def load_geo_maps():
                     cap = cap_digits.zfill(5)
                     if cap and comune and sigla:
                         valid_admin_triples.add(
-                        (cap, comune.strip().lower(), sigla.strip().upper())
-                    )
+                            (cap, comune.strip().lower(), sigla.strip().upper())
+                        )
             if comune and provincia:
                 comune_prov_map[(comune.lower(), provincia.lower())] = {
                     "cap": cap or None,
