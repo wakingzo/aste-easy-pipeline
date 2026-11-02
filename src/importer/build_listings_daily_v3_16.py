@@ -722,6 +722,31 @@ def description_confirms_embedded_admin(
     return embedded_mentioned and not current_mentioned
 
 
+def description_has_strong_location_context(
+    text: Optional[str],
+) -> bool:
+    normalized = normalize_admin_match_text(text)
+    if not normalized:
+        return False
+
+    padded = f" {normalized} "
+
+    cues = [
+        " via ",
+        " viale ",
+        " piazza ",
+        " strada ",
+        " frazione ",
+        " fraz ",
+        " localita ",
+        " contrada ",
+        " comune di ",
+        " nel comune ",
+    ]
+
+    return any(cue in padded for cue in cues)
+
+
 def description_confirms_current_admin(
     search_item: Dict[str, Any],
     detail_body: Dict[str, Any],
@@ -753,9 +778,14 @@ def description_confirms_current_admin(
         embedded_admin.get("comune"),
     )
 
-    # Il comune DB è confermato solo quando la descrizione lo cita
-    # esplicitamente e non cita anche il comune embedded.
-    return current_mentioned and not embedded_mentioned
+    # Il comune DB è confermato solo quando la descrizione lo cita,
+    # non cita anche l'embedded e contiene un contesto localizzativo concreto.
+    # Titoli generici come "POSTI AUTO E DEPOSITO A ROMA" non bastano.
+    return (
+        current_mentioned
+        and not embedded_mentioned
+        and description_has_strong_location_context(text)
+    )
 
 
 def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) -> Dict[str, Any]:
