@@ -1,0 +1,194 @@
+name: Google fallback preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      GOOGLE_GEOCODING_API_KEY: ${{ secrets.GOOGLE_GEOCODING_API_KEY }}
+      GOOGLE_STATE_DIR: runtime/cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Restore mutable Google state
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-fallback-${{ github.run_id }}
+          restore-keys: |
+            runtime-v318-
+
+      - name: Preview Google fallbacks on recent REVIEW rows
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p runtime/cache runtime/state runtime/reports
+
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from datetime import datetime
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          sys.path.insert(0, str(Path("src").resolve()))
+          sys.path.insert(0, str(Path("src/geocoding").resolve()))
+
+          import google_production_v3_18 as prod
+
+          fields = (
+              "pvp_id", "comune", "sigla_provincia", "provincia",
+              "regione", "cap", "indirizzo",
+              "pvp_latitudine", "pvp_longitudine", "pvp_geo_source",
+              "latitudine", "longitudine",
+              "geocode_status", "geocode_input_hash",
+              "geocode_source", "geocode_precision"
+          )
+
+          params = urlencode({
+              "select": ",".join(fields),
+              "geocode_status": "eq.REVIEW",
+              "order": "geocode_checked_at.desc",
+              "limit": "5",
+          })
+
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          url = base + "/rest/v1/listings?" + params
+
+          req = Request(url)
+          req.add_header("apikey", os.environ["SUPABASE_SERVICE_ROLE"])
+          req.add_header(
+              "Authorization",
+              "Bearer " + os.environ["SUPABASE_SERVICE_ROLE"]
+          )
+
+          with urlopen(req, timeout=30) as resp:
+              rows = json.loads(resp.read().decode("utf-8"))
+
+          print(f"[PREVIEW] REVIEW rows selected: {len(rows)}")
+
+          g, reconciliation = prod._load_core_and_reconcile(
+              monthly_cap=9000,
+              run_cap=50,
+          )
+
+          # Preview only: enable the two fuzzy fallbacks with tiny safety caps.
+          g.PLACES_AUTOCOMPLETE_FALLBACK = True
+          g.ADDRESS_VALIDATION_FALLBACK = True
+
+          g.MAX_RUN_AUTOCOMPLETE_CALLS = 10
+          g.MAX_MONTH_AUTOCOMPLETE_CALLS = 9000
+
+          g.MAX_RUN_ADDRESS_VALIDATION_CALLS = 10
+          g.MAX_MONTH_ADDRESS_VALIDATION_CALLS = 4000
+
+          cache = g.CacheStore(g.CACHE_FILE)
+          details = []
+
+          try:
+              for row in rows:
+                  pid = str(row.get("pvp_id") or "")
+
+                  try:
+                      best = g.find_best_forward(row, cache)
+                  except g.ApiBudgetExceeded as exc:
+                      print(f"[STOP SAFETY] {exc}")
+                      break
+
+                  if not best:
+                      rec = {
+                          "pvp_id": pid,
+                          "indirizzo": row.get("indirizzo"),
+                          "comune": row.get("comune"),
+                          "result": "NO_CANDIDATE",
+                      }
+                  else:
+                      query = str(best.get("query") or "")
+
+                      if query.startswith("ADDRESS_VALIDATION:"):
+                          source = "ADDRESS_VALIDATION"
+                      elif query.startswith("AUTOCOMPLETE:"):
+                          source = "AUTOCOMPLETE"
+                      else:
+                          source = "GEOCODING"
+
+                      result = best.get("result") or {}
+                      evaluation = best.get("evaluation") or {}
+
+                      rec = {
+                          "pvp_id": pid,
+                          "indirizzo": row.get("indirizzo"),
+                          "comune": row.get("comune"),
+                          "winner": source,
+                          "query": query,
+                          "formatted_address": result.get("formatted_address"),
+                          "location_type": result.get("location_type"),
+                          "score": evaluation.get("score"),
+                          "confidence": evaluation.get("confidence"),
+                          "lat": result.get("lat"),
+                          "lon": result.get("lon"),
+                      }
+
+                  details.append(rec)
+                  print(json.dumps(rec, ensure_ascii=False, indent=2))
+
+          finally:
+              cache.save()
+              g.API_USAGE.save()
+
+          stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+          out = Path("runtime/reports") / f"google_fallback_preview_{stamp}.json"
+
+          report = {
+              "mode": "PREVIEW_ONLY_NO_SUPABASE_PATCH",
+              "rows_tested": len(details),
+              "results": details,
+              "api_usage": g.API_USAGE.run,
+          }
+
+          out.write_text(
+              json.dumps(report, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+
+          print()
+          print("[API USAGE]")
+          g.API_USAGE.print_summary()
+          print(f"[REPORT] {out}")
+          PY
+
+      - name: Save updated Google counters/cache
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-fallback-${{ github.run_id }}
+
+      - name: Upload preview report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: google-fallback-preview-${{ github.run_id }}
+          path: runtime/reports/google_fallback_preview_*.json
+          if-no-files-found: warn
+          retention-days: 7
