@@ -1,0 +1,186 @@
+name: Resolver regression preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run resolver regression checks
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          root = Path.cwd()
+          sys.path.insert(0, str((root / "src").resolve()))
+          sys.path.insert(0, str((root / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as b
+
+          def check(label, actual, expected):
+              if actual != expected:
+                  raise AssertionError(
+                      f"{label} FAILED: expected={expected!r} actual={actual!r}"
+                  )
+              print(f"[PASS] {label}: {actual!r}")
+
+          def resolve(
+              *,
+              desc,
+              current_comune,
+              provincia,
+              embedded_comune,
+              embedded_cap,
+              embedded_sigla,
+          ):
+              search_item = {"descLotto": desc}
+              detail_body = {}
+              embedded = {
+                  "via": "TEST",
+                  "cap": embedded_cap,
+                  "comune": embedded_comune,
+                  "sigla_provincia": embedded_sigla,
+              }
+              return b.description_confirms_embedded_admin(
+                  search_item,
+                  detail_body,
+                  current_comune,
+                  provincia,
+                  embedded,
+              )
+
+          # 1) Storico reale: il DB dice Vercelli, ma la descrizione
+          #    conferma esplicitamente Borgosesia. Deve poter correggere.
+          check(
+              "Borgosesia confirmed by description",
+              resolve(
+                  desc=(
+                      "In Borgosesia, alloggio al piano primo dello stabile con "
+                      "accessoria cantina. Il tutto distinto al C.F. del Comune "
+                      "di Borgosesia, via Vittorio Veneto n. 78."
+                  ),
+                  current_comune="Vercelli",
+                  provincia="Vercelli",
+                  embedded_comune="Borgosesia",
+                  embedded_cap="13011",
+                  embedded_sigla="VC",
+              ),
+              True,
+          )
+
+          # 2) Storico reale: DB Lisciano Niccone, embedded Umbertide.
+          #    La descrizione conferma il DB, quindi embedded deve perdere.
+          check(
+              "Lisciano Niccone blocks wrong Umbertide",
+              resolve(
+                  desc="LISCIANO NICCONE (PG) VIA LISCIANO NICCONE N. 35",
+                  current_comune="Lisciano Niccone",
+                  provincia="Perugia",
+                  embedded_comune="Umbertide",
+                  embedded_cap="06019",
+                  embedded_sigla="PG",
+              ),
+              False,
+          )
+
+          # 3) Storico reale: la descrizione cita entrambi i comuni.
+          #    Fail closed: nessun override.
+          check(
+              "Chianni and Riparbella both mentioned",
+              resolve(
+                  desc=(
+                      "Terreni posti al limite fra i comuni di Chianni e "
+                      "Riparbella, il cui confine è rappresentato dal torrente."
+                  ),
+                  current_comune="Chianni",
+                  provincia="Pisa",
+                  embedded_comune="Riparbella",
+                  embedded_cap="56046",
+                  embedded_sigla="PI",
+              ),
+              False,
+          )
+
+          # 4) Caso insidioso: il nome DB è prefisso del comune embedded.
+          #    "Calliano Monferrato" contiene anche il token "Calliano":
+          #    entrambi risultano citati, quindi niente override.
+          check(
+              "Calliano versus Calliano Monferrato overlap",
+              resolve(
+                  desc=(
+                      "Abitazione dislocata dal centro abitato Comune di "
+                      "Calliano Monferrato, in zona agricola."
+                  ),
+                  current_comune="Calliano",
+                  provincia="Asti",
+                  embedded_comune="Calliano Monferrato",
+                  embedded_cap="14031",
+                  embedded_sigla="AT",
+              ),
+              False,
+          )
+
+          # 5) Nettuno/Velletri: la descrizione non cita nessuno dei due.
+          #    Anche se sappiamo da fonti esterne che Nettuno è corretto,
+          #    il resolver PVP interno NON deve indovinarlo.
+          check(
+              "Nettuno remains unresolved without description evidence",
+              resolve(
+                  desc="Appartamento e lastrico solare",
+                  current_comune="Velletri",
+                  provincia="Roma",
+                  embedded_comune="Nettuno",
+                  embedded_cap="00048",
+                  embedded_sigla="RM",
+              ),
+              False,
+          )
+
+          # 6) Montecassiano/Macerata: stesso principio.
+          check(
+              "Montecassiano remains unresolved without description evidence",
+              resolve(
+                  desc=(
+                      "Diritti pari a 1/1 di piena proprietà di abitazione "
+                      "al piano terra e primo di porzione di un fabbricato."
+                  ),
+                  current_comune="Macerata",
+                  provincia="Macerata",
+                  embedded_comune="Montecassiano",
+                  embedded_cap="62010",
+                  embedded_sigla="MC",
+              ),
+              False,
+          )
+
+          # 7) Safety guard: anche una descrizione favorevole non basta
+          #    se la sigla embedded è incompatibile con la provincia corrente.
+          check(
+              "Cross-province embedded is never auto-confirmed",
+              resolve(
+                  desc="Immobile sito nel Comune di Borgosesia.",
+                  current_comune="Milano",
+                  provincia="Milano",
+                  embedded_comune="Borgosesia",
+                  embedded_cap="13011",
+                  embedded_sigla="VC",
+              ),
+              False,
+          )
+
+          print()
+          print("ALL RESOLVER REGRESSION CHECKS PASSED")
+          PY
