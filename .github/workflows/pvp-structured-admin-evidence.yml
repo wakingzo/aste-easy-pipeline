@@ -1,0 +1,326 @@
+name: PVP structured admin evidence audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Audit structured PVP admin evidence - read only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import time
+          import unicodedata
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          ROOT = Path.cwd()
+          REF = ROOT / "data" / "reference" / "comuni_cap.csv"
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          DETAIL_URL = (
+              "https://pvp.giustizia.it/"
+              "ve-3f723b85-986a1b71/ve-ms/vendite/{pvp_id}/restricted"
+          )
+          PVP_HEADERS = {
+              "Accept": "application/json, text/plain, */*",
+              "Referer": "https://pvp.giustizia.it/pvp/it/lista_annunci.page",
+              "Origin": "https://pvp.giustizia.it",
+              "User-Agent": "Mozilla/5.0",
+          }
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(r"\s+", " ", str(v).replace("\u00a0", " ")).strip()
+
+          def norm(v):
+              s = clean(v).replace("’", "'").replace("`", "'")
+              s = unicodedata.normalize("NFKD", s)
+              s = "".join(ch for ch in s if not unicodedata.combining(ch))
+              s = s.lower()
+              s = re.sub(r"[^a-z0-9]+", " ", s)
+              return re.sub(r"\s+", " ", s).strip()
+
+          def norm_cap(v):
+              d = re.sub(r"\D", "", clean(v))
+              if not d:
+                  return ""
+              return d.zfill(5) if len(d) <= 5 else d
+
+          def norm_sigla(v):
+              return re.sub(r"[^A-Za-z]", "", clean(v)).upper()
+
+          # Canonical municipality lookup from local reference.
+          triples_by_cap = defaultdict(list)
+          canonical_by_norm = defaultdict(set)
+
+          with REF.open("r", encoding="utf-8-sig", errors="replace", newline="") as f:
+              for row in csv.DictReader(f, delimiter=";"):
+                  comune = clean(row.get("comune"))
+                  cap = norm_cap(row.get("cap"))
+                  sigla = norm_sigla(row.get("sigla_provincia"))
+                  ncom = norm(comune)
+                  if not comune or not cap or len(sigla) != 2:
+                      continue
+                  rec = {
+                      "cap": cap,
+                      "comune": comune,
+                      "comune_norm": ncom,
+                      "sigla": sigla,
+                  }
+                  triples_by_cap[cap].append(rec)
+                  canonical_by_norm[ncom].add(comune)
+
+          def embedded_verified_triples(address):
+              n = norm(address)
+              caps = set(re.findall(r"(?<!\d)\d{5}(?!\d)", n))
+              found = {}
+              for cap in caps:
+                  for rec in triples_by_cap.get(cap, ()):
+                      needle = f"{cap} {rec['comune_norm']} {rec['sigla'].lower()}"
+                      if re.search(
+                          r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])",
+                          n,
+                      ):
+                          key = (rec["cap"], rec["comune_norm"], rec["sigla"])
+                          found[key] = rec
+              return list(found.values())
+
+          def get_json(url, headers=None, timeout=60):
+              req = Request(url, method="GET")
+              for k, v in (headers or {}).items():
+                  req.add_header(k, v)
+              with urlopen(req, timeout=timeout) as resp:
+                  return json.loads(resp.read().decode("utf-8"))
+
+          # Read all current listings from Supabase - GET only.
+          fields = [
+              "pvp_id", "status", "indirizzo", "comune", "cap",
+              "sigla_provincia", "provincia", "regione",
+              "geocode_status", "geocode_source", "geocode_precision",
+              "latitudine", "longitudine",
+          ]
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          rows = []
+          page_size = 1000
+          offset = 0
+          while True:
+              params = urlencode({
+                  "select": ",".join(fields),
+                  "order": "pvp_id.asc",
+                  "limit": str(page_size),
+                  "offset": str(offset),
+              })
+              req = Request(base + "/rest/v1/listings?" + params, method="GET")
+              req.add_header("apikey", key)
+              req.add_header("Authorization", "Bearer " + key)
+              with urlopen(req, timeout=60) as resp:
+                  batch = json.loads(resp.read().decode("utf-8"))
+              if not isinstance(batch, list):
+                  raise RuntimeError("Unexpected Supabase response")
+              rows.extend(batch)
+              if len(batch) < page_size:
+                  break
+              offset += page_size
+
+          # Only TRUE municipality conflicts: exactly one verified embedded triple
+          # and its municipality differs from the DB municipality.
+          conflicts = []
+          for row in rows:
+              hits = embedded_verified_triples(row.get("indirizzo"))
+              if len(hits) != 1:
+                  continue
+              hit = hits[0]
+              if norm(row.get("comune")) == hit["comune_norm"]:
+                  continue
+              conflicts.append((row, hit))
+
+          print(f"[AUDIT] total listings: {len(rows):,}")
+          print(f"[AUDIT] municipality conflicts to inspect: {len(conflicts):,}")
+
+          results = []
+          classes = Counter()
+
+          for idx, (row, embedded) in enumerate(conflicts, start=1):
+              pid = str(row.get("pvp_id") or "")
+              db_comune = clean(row.get("comune"))
+              embedded_comune = embedded["comune"]
+
+              detail_comunes = []
+              bene_comunes = []
+              detail_addr = {}
+              detail_desc = ""
+              bene_descs = []
+              fetch_error = ""
+
+              try:
+                  raw = get_json(
+                      DETAIL_URL.format(pvp_id=pid),
+                      headers=PVP_HEADERS,
+                      timeout=60,
+                  )
+                  body = raw.get("body") or {}
+
+                  detail_addr = body.get("indirizzo") or {}
+                  dc = clean(detail_addr.get("descComune"))
+                  if dc:
+                      detail_comunes.append(dc)
+
+                  lotto = body.get("lotto") or {}
+                  detail_desc = clean(
+                      lotto.get("descLotto") or body.get("descLotto")
+                  )
+
+                  for bene in (lotto.get("beni") or []):
+                      ba = (bene or {}).get("indirizzo") or {}
+                      bc = clean(ba.get("descComune"))
+                      if bc:
+                          bene_comunes.append(bc)
+                      bd = clean((bene or {}).get("descBene"))
+                      if bd:
+                          bene_descs.append(bd)
+
+              except Exception as exc:
+                  fetch_error = f"{type(exc).__name__}: {exc}"
+
+              # Preserve unique structured municipalities.
+              structured = []
+              for c in detail_comunes + bene_comunes:
+                  if c and norm(c) not in [norm(x) for x in structured]:
+                      structured.append(c)
+
+              db_n = norm(db_comune)
+              emb_n = norm(embedded_comune)
+              structured_n = {norm(x) for x in structured if norm(x)}
+
+              if fetch_error:
+                  classification = "PVP_DETAIL_FETCH_ERROR"
+              elif not structured_n:
+                  classification = "NO_STRUCTURED_ADMIN_EVIDENCE"
+              elif structured_n == {db_n}:
+                  classification = "STRUCTURED_SUPPORTS_DB"
+              elif structured_n == {emb_n}:
+                  classification = "STRUCTURED_SUPPORTS_EMBEDDED"
+              elif len(structured_n) == 1 and db_n not in structured_n and emb_n not in structured_n:
+                  classification = "STRUCTURED_SUPPORTS_THIRD_COMUNE"
+              elif db_n in structured_n and emb_n in structured_n:
+                  classification = "STRUCTURED_MIXED_DB_AND_EMBEDDED"
+              elif db_n in structured_n:
+                  classification = "STRUCTURED_MIXED_INCLUDES_DB"
+              elif emb_n in structured_n:
+                  classification = "STRUCTURED_MIXED_INCLUDES_EMBEDDED"
+              else:
+                  classification = "STRUCTURED_MIXED_OTHER"
+
+              classes[classification] += 1
+
+              rec = {
+                  "pvp_id": pid,
+                  "status": row.get("status"),
+                  "indirizzo_db": row.get("indirizzo"),
+                  "db_comune": db_comune,
+                  "db_cap": row.get("cap"),
+                  "db_sigla": row.get("sigla_provincia"),
+                  "embedded_comune": embedded_comune,
+                  "embedded_cap": embedded["cap"],
+                  "embedded_sigla": embedded["sigla"],
+                  "detail_descComune": " | ".join(dict.fromkeys(detail_comunes)),
+                  "beni_descComune": " | ".join(dict.fromkeys(bene_comunes)),
+                  "structured_comuni": " | ".join(structured),
+                  "classification": classification,
+                  "geocode_status": row.get("geocode_status"),
+                  "geocode_source": row.get("geocode_source"),
+                  "geocode_precision": row.get("geocode_precision"),
+                  "detail_descLotto": detail_desc,
+                  "beni_descBene": " || ".join(bene_descs),
+                  "fetch_error": fetch_error,
+              }
+              results.append(rec)
+
+              print(
+                  f"[{idx:02d}/{len(conflicts)}] {pid} "
+                  f"DB={db_comune!r} EMB={embedded_comune!r} "
+                  f"STRUCT={structured!r} -> {classification}"
+              )
+              time.sleep(0.15)
+
+          stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+          csv_path = OUTDIR / f"pvp_structured_admin_evidence_{stamp}.csv"
+          json_path = OUTDIR / f"pvp_structured_admin_evidence_{stamp}.json"
+
+          cols = []
+          for rec in results:
+              for k in rec:
+                  if k not in cols:
+                      cols.append(k)
+
+          with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=cols)
+              w.writeheader()
+              w.writerows(results)
+
+          summary = {
+              "mode": "READ_ONLY_NO_SUPABASE_WRITES",
+              "google_calls": 0,
+              "total_listings_scanned": len(rows),
+              "municipality_conflicts_inspected": len(conflicts),
+              "classification_counts": dict(classes),
+              "results": results,
+          }
+          json_path.write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print()
+          print("[CLASSIFICATION COUNTS]")
+          print(json.dumps(dict(classes), ensure_ascii=False, indent=2))
+          print(f"[CSV] {csv_path}")
+          print(f"[JSON] {json_path}")
+
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as f:
+                  f.write("## PVP structured admin evidence audit\n\n")
+                  f.write(f"- Municipality conflicts inspected: **{len(conflicts)}**\n")
+                  for name, count in sorted(classes.items()):
+                      f.write(f"- {name}: **{count}**\n")
+                  f.write("\n**Read-only:** no Supabase writes and no Google calls.\n")
+          PY
+
+      - name: Upload audit reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pvp-structured-admin-evidence-${{ github.run_id }}
+          path: runtime/reports/pvp_structured_admin_evidence_*
+          if-no-files-found: error
+          retention-days: 14
