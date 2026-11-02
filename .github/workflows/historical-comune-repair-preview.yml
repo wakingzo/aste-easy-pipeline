@@ -1,0 +1,351 @@
+name: Historical comune repair preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build read-only repair preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          ROOT = Path.cwd()
+          sys.path.insert(0, str((ROOT / "src").resolve()))
+          sys.path.insert(0, str((ROOT / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as builder
+
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(r"\s+", " ", str(v).replace("\u00a0", " ")).strip()
+
+          def fingerprint(row):
+              keys = (
+                  "pvp_id",
+                  "indirizzo",
+                  "comune",
+                  "sigla_provincia",
+                  "cap",
+                  "pvp_latitudine",
+                  "pvp_longitudine",
+                  "pvp_geo_source",
+              )
+              data = json.dumps(
+                  {k: row.get(k) for k in keys},
+                  ensure_ascii=False,
+                  sort_keys=True,
+                  separators=(",", ":"),
+              )
+              return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+          # Read-only Supabase fetch.
+          fields = [
+              "pvp_id",
+              "status",
+              "indirizzo",
+              "comune",
+              "cap",
+              "sigla_provincia",
+              "provincia",
+              "regione",
+              "descrizione",
+              "maps_link",
+              "latitudine",
+              "longitudine",
+              "pvp_latitudine",
+              "pvp_longitudine",
+              "pvp_geo_source",
+              "geocode_status",
+              "geocode_source",
+              "geocode_precision",
+              "geocode_input_hash",
+          ]
+
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          rows = []
+          limit = 1000
+          offset = 0
+
+          while True:
+              params = urlencode({
+                  "select": ",".join(fields),
+                  "order": "pvp_id.asc",
+                  "limit": str(limit),
+                  "offset": str(offset),
+              })
+              req = Request(base + "/rest/v1/listings?" + params, method="GET")
+              req.add_header("apikey", key)
+              req.add_header("Authorization", "Bearer " + key)
+
+              with urlopen(req, timeout=60) as resp:
+                  batch = json.loads(resp.read().decode("utf-8"))
+
+              if not isinstance(batch, list):
+                  raise RuntimeError("Unexpected Supabase response")
+
+              rows.extend(batch)
+              print(
+                  f"[FETCH] offset={offset:,} rows={len(batch):,} "
+                  f"total={len(rows):,}"
+              )
+
+              if len(batch) < limit:
+                  break
+              offset += limit
+
+          preview = []
+          counts = Counter()
+
+          for row in rows:
+              candidate = builder.extract_verified_admin_tail(
+                  row.get("indirizzo")
+              )
+              if not candidate:
+                  continue
+
+              current_comune = clean(row.get("comune"))
+              embedded_comune = clean(candidate.get("comune"))
+
+              if (
+                  not current_comune
+                  or builder.normalize_admin_match_text(current_comune)
+                  == builder.normalize_admin_match_text(embedded_comune)
+              ):
+                  continue
+
+              description = clean(row.get("descrizione"))
+
+              current_mentioned = builder.description_mentions_comune(
+                  description,
+                  current_comune,
+              )
+              embedded_mentioned = builder.description_mentions_comune(
+                  description,
+                  embedded_comune,
+              )
+
+              resolver_accepts = builder.description_confirms_embedded_admin(
+                  {"descLotto": description},
+                  {},
+                  current_comune,
+                  clean(row.get("provincia")),
+                  candidate,
+              )
+
+              if resolver_accepts:
+                  action = "AUTO_FIX"
+                  reason = (
+                      "description mentions embedded comune only; "
+                      "same-province guard passed"
+                  )
+              elif current_mentioned and not embedded_mentioned:
+                  action = "KEEP_DB"
+                  reason = "description confirms current DB comune"
+              elif current_mentioned and embedded_mentioned:
+                  action = "REVIEW"
+                  reason = "description mentions both current and embedded comune"
+              elif embedded_mentioned and not current_mentioned:
+                  action = "REVIEW"
+                  reason = (
+                      "description favors embedded comune but production "
+                      "resolver safety guard does not allow auto-fix"
+                  )
+              else:
+                  action = "REVIEW"
+                  reason = "description provides no decisive municipality evidence"
+
+              counts[action] += 1
+
+              proposed_comune = ""
+              proposed_cap = ""
+              proposed_sigla = ""
+              proposed_indirizzo = ""
+              proposed_geocode_status = ""
+              proposed_geocode_input_hash = ""
+              proposed_clear_coordinates = ""
+              proposed_clear_maps_link = ""
+
+              if action == "AUTO_FIX":
+                  proposed_comune = candidate["comune"]
+                  proposed_cap = candidate["cap"]
+                  proposed_sigla = candidate["sigla_provincia"]
+                  proposed_indirizzo = builder.build_full_property_address(
+                      candidate["via"],
+                      proposed_cap,
+                      proposed_comune,
+                      proposed_sigla,
+                  )
+
+                  future_row = dict(row)
+                  future_row.update({
+                      "comune": proposed_comune,
+                      "cap": proposed_cap,
+                      "sigla_provincia": proposed_sigla,
+                      "indirizzo": proposed_indirizzo,
+                  })
+
+                  proposed_geocode_status = "PENDING"
+                  proposed_geocode_input_hash = fingerprint(future_row)
+                  proposed_clear_coordinates = "YES"
+                  proposed_clear_maps_link = "YES"
+
+              preview.append({
+                  "pvp_id": row.get("pvp_id"),
+                  "action": action,
+                  "reason": reason,
+                  "status": row.get("status"),
+                  "current_comune": row.get("comune"),
+                  "current_cap": row.get("cap"),
+                  "current_sigla": row.get("sigla_provincia"),
+                  "provincia": row.get("provincia"),
+                  "current_indirizzo": row.get("indirizzo"),
+                  "embedded_comune": candidate.get("comune"),
+                  "embedded_cap": candidate.get("cap"),
+                  "embedded_sigla": candidate.get("sigla_provincia"),
+                  "description_mentions_current": current_mentioned,
+                  "description_mentions_embedded": embedded_mentioned,
+                  "descrizione": description,
+                  "current_geocode_status": row.get("geocode_status"),
+                  "current_geocode_source": row.get("geocode_source"),
+                  "current_geocode_precision": row.get("geocode_precision"),
+                  "current_latitudine": row.get("latitudine"),
+                  "current_longitudine": row.get("longitudine"),
+                  "current_maps_link": row.get("maps_link"),
+                  "current_geocode_input_hash": row.get("geocode_input_hash"),
+                  "proposed_comune": proposed_comune,
+                  "proposed_cap": proposed_cap,
+                  "proposed_sigla": proposed_sigla,
+                  "proposed_indirizzo": proposed_indirizzo,
+                  "proposed_geocode_status": proposed_geocode_status,
+                  "proposed_geocode_input_hash": proposed_geocode_input_hash,
+                  "proposed_clear_coordinates": proposed_clear_coordinates,
+                  "proposed_clear_maps_link": proposed_clear_maps_link,
+              })
+
+          stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+          csv_path = OUTDIR / f"historical_comune_repair_preview_{stamp}.csv"
+          json_path = OUTDIR / f"historical_comune_repair_preview_{stamp}.json"
+
+          cols = []
+          for rec in preview:
+              for k in rec:
+                  if k not in cols:
+                      cols.append(k)
+
+          with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+              if cols:
+                  w = csv.DictWriter(f, fieldnames=cols)
+                  w.writeheader()
+                  w.writerows(preview)
+
+          summary = {
+              "mode": "READ_ONLY_NO_WRITES",
+              "created_at_utc": datetime.now(timezone.utc).isoformat(),
+              "total_listings_scanned": len(rows),
+              "true_comune_conflicts": len(preview),
+              "action_counts": dict(counts),
+              "auto_fix_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "AUTO_FIX"
+              ],
+              "keep_db_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "KEEP_DB"
+              ],
+              "review_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "REVIEW"
+              ],
+              "safety": {
+                  "supabase_writes": 0,
+                  "google_calls": 0,
+                  "auto_fix_requires": (
+                      "embedded municipality explicitly mentioned in description, "
+                      "current municipality not mentioned, same-province guard passed"
+                  ),
+                  "future_patch_note": (
+                      "Any AUTO_FIX must reset published geocoding coordinates/maps "
+                      "and set geocode_status=PENDING with a recomputed input hash."
+                  ),
+              },
+          }
+
+          json_path.write_text(
+              json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          print()
+          print("[SUMMARY]")
+          print(json.dumps(summary, ensure_ascii=False, indent=2))
+          print()
+          print("[AUTO_FIX]")
+          for rec in preview:
+              if rec["action"] == "AUTO_FIX":
+                  print(
+                      f"{rec['pvp_id']}: "
+                      f"{rec['current_comune']} -> {rec['proposed_comune']} | "
+                      f"{rec['proposed_indirizzo']}"
+                  )
+
+          print()
+          print(f"[CSV] {csv_path}")
+          print(f"[JSON] {json_path}")
+
+          step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if step_summary:
+              with open(step_summary, "a", encoding="utf-8") as f:
+                  f.write("## Historical comune repair preview\n\n")
+                  f.write(f"- Conflicts: **{len(preview)}**\n")
+                  f.write(f"- AUTO_FIX: **{counts['AUTO_FIX']}**\n")
+                  f.write(f"- KEEP_DB: **{counts['KEEP_DB']}**\n")
+                  f.write(f"- REVIEW: **{counts['REVIEW']}**\n")
+                  f.write("\nRead-only: **0 Supabase writes, 0 Google calls**.\n")
+          PY
+
+      - name: Upload preview reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-comune-repair-preview-${{ github.run_id }}
+          path: runtime/reports/historical_comune_repair_preview_*
+          if-no-files-found: error
+          retention-days: 14
