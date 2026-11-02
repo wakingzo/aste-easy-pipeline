@@ -107,48 +107,45 @@ jobs:
                       out.append(ref_names[n])
               return list(dict.fromkeys(out))
 
-          def structured_communes(detail_body):
-              values = []
+          def structured_evidence(detail_body):
+              bene_values = []
+              top_values = []
 
-              def add_addr(addr, source):
+              def read_addr(addr):
                   addr = addr or {}
-                  value = clean(
+                  return clean(
                       addr.get("descComune")
                       or addr.get("citta")
                       or addr.get("comune")
                   )
-                  if value:
-                      values.append((source, value))
 
-              add_addr(detail_body.get("indirizzo"), "detail.indirizzo")
+              top = read_addr(detail_body.get("indirizzo"))
+              if top:
+                  top_values.append(("detail.indirizzo", top))
 
               for i, bene in enumerate(detail_body.get("beni") or [], start=1):
-                  add_addr((bene or {}).get("indirizzo"), f"detail.beni[{i}]")
+                  value = read_addr((bene or {}).get("indirizzo"))
+                  if value:
+                      bene_values.append((f"detail.beni[{i}]", value))
 
               lotto = detail_body.get("lotto") or {}
               for i, bene in enumerate(lotto.get("beni") or [], start=1):
-                  add_addr((bene or {}).get("indirizzo"), f"lotto.beni[{i}]")
+                  value = read_addr((bene or {}).get("indirizzo"))
+                  if value:
+                      bene_values.append((f"lotto.beni[{i}]", value))
 
-              # Preserve source detail but de-duplicate exact pairs.
-              return list(dict.fromkeys(values))
+              return (
+                  list(dict.fromkeys(bene_values)),
+                  list(dict.fromkeys(top_values)),
+              )
 
           def classify(
               *,
               current,
               embedded,
-              provincia,
               full_description,
-              structured,
+              bene_structured,
           ):
-              embedded_admin = {
-                  "via": "TEST",
-                  "cap": "00000",
-                  "comune": embedded,
-                  "sigla_provincia": "",
-              }
-
-              # For embedded confirmation, use the same logical description
-              # rule as production but without relying on the synthetic sigla.
               current_mentioned = builder.description_mentions_comune(
                   full_description, current
               )
@@ -159,61 +156,87 @@ jobs:
                   full_description
               )
 
-              description_db = (
+              if (
                   current_mentioned
                   and not embedded_mentioned
                   and strong_context
-              )
-              description_embedded = (
+              ):
+                  description_state = "DESCRIPTION_DB_ONLY"
+              elif (
                   embedded_mentioned
                   and not current_mentioned
                   and strong_context
-              )
+              ):
+                  description_state = "DESCRIPTION_EMBEDDED_ONLY"
+              elif current_mentioned and embedded_mentioned:
+                  description_state = "DESCRIPTION_BOTH"
+              else:
+                  description_state = "DESCRIPTION_INCONCLUSIVE"
 
-              structured_norms = [norm(v) for _, v in structured if norm(v)]
-              structured_unique = list(dict.fromkeys(structured_norms))
-
+              bene_norms = [
+                  norm(v) for _, v in bene_structured if norm(v)
+              ]
+              bene_unique = list(dict.fromkeys(bene_norms))
               current_norm = norm(current)
               embedded_norm = norm(embedded)
 
-              structured_db = (
-                  bool(structured_unique)
-                  and set(structured_unique) == {current_norm}
-              )
-              structured_embedded = (
-                  bool(structured_unique)
-                  and set(structured_unique) == {embedded_norm}
-              )
-
-              third_structured = [
-                  v for v in structured_unique
+              has_db = current_norm in bene_unique
+              has_embedded = embedded_norm in bene_unique
+              third = [
+                  v for v in bene_unique
                   if v not in {current_norm, embedded_norm}
               ]
 
-              # Fail closed when independent PVP evidence disagrees.
-              if description_db and structured_embedded:
-                  return "AMBIGUOUS_PVP_CONFLICT"
-              if description_embedded and structured_db:
-                  return "AMBIGUOUS_PVP_CONFLICT"
+              if third:
+                  bene_state = "BENI_THIRD_OR_ALIAS"
+              elif has_db and has_embedded:
+                  bene_state = "BENI_DB_AND_EMBEDDED"
+              elif has_db:
+                  bene_state = "BENI_DB_ONLY"
+              elif has_embedded:
+                  bene_state = "BENI_EMBEDDED_ONLY"
+              elif bene_unique:
+                  bene_state = "BENI_OTHER"
+              else:
+                  bene_state = "BENI_NO_COMUNE"
 
-              if third_structured:
-                  return "THIRD_COMUNE_STRUCTURED"
+              # Auto-resolution is intentionally stricter than evidence
+              # reporting. A description with concrete location context may
+              # resolve a side unless the bene fields explicitly oppose it.
+              if (
+                  description_state == "DESCRIPTION_DB_ONLY"
+                  and bene_state not in {
+                      "BENI_EMBEDDED_ONLY",
+                      "BENI_DB_AND_EMBEDDED",
+                      "BENI_THIRD_OR_ALIAS",
+                      "BENI_OTHER",
+                  }
+              ):
+                  final = "DB_CONFIRMED_STRONG"
+              elif (
+                  description_state == "DESCRIPTION_EMBEDDED_ONLY"
+                  and bene_state not in {
+                      "BENI_DB_ONLY",
+                      "BENI_DB_AND_EMBEDDED",
+                      "BENI_THIRD_OR_ALIAS",
+                      "BENI_OTHER",
+                  }
+              ):
+                  final = "EMBEDDED_CONFIRMED_STRONG"
+              elif bene_state == "BENI_DB_ONLY":
+                  final = "DB_STRUCTURED_ONLY"
+              elif bene_state == "BENI_EMBEDDED_ONLY":
+                  final = "EMBEDDED_STRUCTURED_ONLY"
+              elif bene_state in {
+                  "BENI_DB_AND_EMBEDDED",
+                  "BENI_THIRD_OR_ALIAS",
+                  "BENI_OTHER",
+              }:
+                  final = "PVP_INTERNAL_CONFLICT"
+              else:
+                  final = "AMBIGUOUS"
 
-              # Strong description evidence can resolve the pair as long as
-              # structured evidence does not point to the opposite side.
-              if description_db and not structured_embedded:
-                  return "DB_CONFIRMED"
-              if description_embedded and not structured_db:
-                  return "EMBEDDED_CONFIRMED"
-
-              # If descriptions are inconclusive, unanimous structured fields
-              # can still support one side.
-              if structured_db and not embedded_mentioned:
-                  return "DB_CONFIRMED"
-              if structured_embedded and not current_mentioned:
-                  return "EMBEDDED_CONFIRMED"
-
-              return "AMBIGUOUS"
+              return final, description_state, bene_state
 
           base = os.environ["SUPABASE_URL"].rstrip("/")
           key = os.environ["SUPABASE_SERVICE_ROLE"]
@@ -272,13 +295,12 @@ jobs:
                   {"descLotto": row.get("descrizione")},
                   detail_body,
               )
-              structured = structured_communes(detail_body)
-              action = classify(
+              bene_structured, top_structured = structured_evidence(detail_body)
+              action, description_state, bene_state = classify(
                   current=current,
                   embedded=embedded,
-                  provincia=row.get("provincia"),
                   full_description=full_description,
-                  structured=structured,
+                  bene_structured=bene_structured,
               )
 
               current_mentioned = builder.description_mentions_comune(
@@ -298,7 +320,7 @@ jobs:
               ]
 
               structured_values = list(dict.fromkeys(
-                  v for _, v in structured
+                  v for _, v in bene_structured
               ))
               third_structured = [
                   x for x in structured_values
@@ -316,8 +338,13 @@ jobs:
                   "description_current_mentioned": current_mentioned,
                   "description_embedded_mentioned": embedded_mentioned,
                   "strong_location_context": strong_context,
-                  "structured_communes": " || ".join(
-                      f"{src}: {value}" for src, value in structured
+                  "description_state": description_state,
+                  "bene_state": bene_state,
+                  "bene_structured_communes": " || ".join(
+                      f"{src}: {value}" for src, value in bene_structured
+                  ),
+                  "top_level_structured_communes_diagnostic": " || ".join(
+                      f"{src}: {value}" for src, value in top_structured
                   ),
                   "third_structured_communes": " || ".join(third_structured),
                   "third_description_mentions_diagnostic": " || ".join(
@@ -374,7 +401,10 @@ jobs:
                   f"desc_db={rec['description_current_mentioned']} "
                   f"desc_emb={rec['description_embedded_mentioned']} "
                   f"strong={rec['strong_location_context']} | "
-                  f"structured={rec['structured_communes']!r} | "
+                  f"desc_state={rec['description_state']} "
+                  f"bene_state={rec['bene_state']} | "
+                  f"beni={rec['bene_structured_communes']!r} | "
+                  f"top_diag={rec['top_level_structured_communes_diagnostic']!r} | "
                   f"third_desc={rec['third_description_mentions_diagnostic']!r}"
               )
 
