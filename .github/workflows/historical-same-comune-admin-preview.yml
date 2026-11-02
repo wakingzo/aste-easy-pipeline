@@ -1,0 +1,607 @@
+name: Historical same-comune CAP/sigla preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/historical-same-comune-admin-preview.yml"
+      - "data/reference/comuni_cap.csv"
+      - "src/importer/build_listings_daily_v3_16.py"
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build read-only same-comune admin preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p runtime/reports
+
+          python - <<'PY'
+          import csv
+          import json
+          import os
+          import re
+          import sys
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from urllib.parse import urlencode
+          from urllib.request import Request, urlopen
+
+          ROOT = Path.cwd()
+          sys.path.insert(0, str((ROOT / "src").resolve()))
+          sys.path.insert(0, str((ROOT / "src" / "importer").resolve()))
+
+          import build_listings_daily_v3_16 as builder
+
+          REF = ROOT / "data" / "reference" / "comuni_cap.csv"
+          OUTDIR = ROOT / "runtime" / "reports"
+          OUTDIR.mkdir(parents=True, exist_ok=True)
+
+          def clean(v):
+              if v is None:
+                  return ""
+              return re.sub(
+                  r"\s+",
+                  " ",
+                  str(v).replace("\u00a0", " "),
+              ).strip()
+
+          def norm_cap(v):
+              digits = re.sub(r"\D", "", clean(v))
+              if not digits:
+                  return ""
+              return digits.zfill(5) if len(digits) <= 5 else digits
+
+          def norm_sigla(v):
+              return re.sub(r"[^A-Za-z]", "", clean(v)).upper()
+
+          def norm_comune(v):
+              return builder.normalize_admin_match_text(v)
+
+          # --------------------------------------------------------------
+          # Canonical reference indexes.
+          # --------------------------------------------------------------
+          triples_by_cap = defaultdict(list)
+          ref_by_comune = defaultdict(list)
+
+          with REF.open(
+              "r",
+              encoding="utf-8-sig",
+              errors="replace",
+              newline="",
+          ) as f:
+              for row in csv.DictReader(f, delimiter=";"):
+                  comune = clean(row.get("comune"))
+                  cap = norm_cap(row.get("cap"))
+                  sigla = norm_sigla(row.get("sigla_provincia"))
+                  provincia = clean(row.get("provincia"))
+                  regione = clean(row.get("regione"))
+
+                  if not comune or not cap or len(sigla) != 2:
+                      continue
+
+                  rec = {
+                      "cap": cap,
+                      "comune": comune,
+                      "comune_norm": norm_comune(comune),
+                      "sigla_provincia": sigla,
+                      "provincia": provincia,
+                      "regione": regione,
+                  }
+                  triples_by_cap[cap].append(rec)
+                  ref_by_comune[rec["comune_norm"]].append(rec)
+
+          def embedded_verified_candidates(address):
+              raw = clean(address)
+              normalized = norm_comune(raw)
+
+              caps = set(
+                  re.findall(r"(?<!\d)\d{5}(?!\d)", normalized)
+              )
+
+              found = {}
+              for cap in caps:
+                  for rec in triples_by_cap.get(cap, ()):
+                      needle = (
+                          f"{cap} "
+                          f"{rec['comune_norm']} "
+                          f"{rec['sigla_provincia'].lower()}"
+                      )
+
+                      if not re.search(
+                          r"(?<![a-z0-9])"
+                          + re.escape(needle)
+                          + r"(?![a-z0-9])",
+                          normalized,
+                      ):
+                          continue
+
+                      key = (
+                          rec["cap"],
+                          rec["comune_norm"],
+                          rec["sigla_provincia"],
+                      )
+
+                      cap_match = re.search(
+                          r"(?<!\d)"
+                          + re.escape(rec["cap"])
+                          + r"(?!\d)",
+                          raw,
+                      )
+                      street = (
+                          raw[:cap_match.start()].rstrip(" ,")
+                          if cap_match else ""
+                      )
+
+                      found[key] = {**rec, "via": street}
+
+              return list(found.values())
+
+          # --------------------------------------------------------------
+          # Read current Supabase rows, GET only.
+          # --------------------------------------------------------------
+          fields = [
+              "pvp_id",
+              "status",
+              "indirizzo",
+              "comune",
+              "cap",
+              "sigla_provincia",
+              "provincia",
+              "regione",
+              "maps_link",
+              "latitudine",
+              "longitudine",
+              "geocode_status",
+              "geocode_source",
+              "geocode_precision",
+          ]
+
+          base = os.environ["SUPABASE_URL"].rstrip("/")
+          key = os.environ["SUPABASE_SERVICE_ROLE"]
+
+          rows = []
+          limit = 1000
+          offset = 0
+
+          while True:
+              params = urlencode({
+                  "select": ",".join(fields),
+                  "order": "pvp_id.asc",
+                  "limit": str(limit),
+                  "offset": str(offset),
+              })
+
+              req = Request(
+                  base + "/rest/v1/listings?" + params,
+                  method="GET",
+              )
+              req.add_header("apikey", key)
+              req.add_header("Authorization", "Bearer " + key)
+
+              with urlopen(req, timeout=60) as resp:
+                  batch = json.loads(resp.read().decode("utf-8"))
+
+              if not isinstance(batch, list):
+                  raise RuntimeError("Unexpected Supabase response")
+
+              rows.extend(batch)
+
+              print(
+                  f"[FETCH] offset={offset:,} rows={len(batch):,} "
+                  f"total={len(rows):,}"
+              )
+
+              if len(batch) < limit:
+                  break
+              offset += limit
+
+          preview = []
+          multiple_candidate_rows = []
+
+          for row in rows:
+              candidates = embedded_verified_candidates(row.get("indirizzo"))
+
+              if not candidates:
+                  continue
+
+              if len(candidates) != 1:
+                  multiple_candidate_rows.append({
+                      "pvp_id": row.get("pvp_id"),
+                      "indirizzo": row.get("indirizzo"),
+                      "candidate_count": len(candidates),
+                      "candidates": " | ".join(
+                          f"{x['cap']} {x['comune']} "
+                          f"{x['sigla_provincia']}"
+                          for x in candidates
+                      ),
+                  })
+                  continue
+
+              embedded = candidates[0]
+
+              current_comune = clean(row.get("comune"))
+              current_norm = norm_comune(current_comune)
+              embedded_norm = norm_comune(embedded.get("comune"))
+
+              if not current_norm or current_norm != embedded_norm:
+                  continue
+
+              current_cap = norm_cap(row.get("cap"))
+              current_sigla = norm_sigla(row.get("sigla_provincia"))
+              embedded_cap = norm_cap(embedded.get("cap"))
+              embedded_sigla = norm_sigla(
+                  embedded.get("sigla_provincia")
+              )
+
+              # We only want the historical same-comune admin conflicts.
+              if (
+                  current_cap == embedded_cap
+                  and current_sigla == embedded_sigla
+              ):
+                  continue
+
+              refs = ref_by_comune.get(current_norm, [])
+              valid_caps = sorted({x["cap"] for x in refs})
+              valid_sigle = sorted({
+                  x["sigla_provincia"] for x in refs
+              })
+              valid_triples = {
+                  (
+                      x["cap"],
+                      x["sigla_provincia"],
+                  )
+                  for x in refs
+              }
+
+              current_pair_valid = (
+                  current_cap,
+                  current_sigla,
+              ) in valid_triples
+
+              current_cap_valid = (
+                  bool(current_cap)
+                  and current_cap in valid_caps
+              )
+              current_sigla_valid = (
+                  bool(current_sigla)
+                  and current_sigla in valid_sigle
+              )
+
+              embedded_pair_valid = (
+                  embedded_cap,
+                  embedded_sigla,
+              ) in valid_triples
+
+              is_multi_cap = len(valid_caps) > 1
+              is_multi_sigla = len(valid_sigle) > 1
+
+              if current_pair_valid and embedded_pair_valid:
+                  if (
+                      current_cap != embedded_cap
+                      and current_sigla == embedded_sigla
+                      and is_multi_cap
+                  ):
+                      classification = "BOTH_VALID_MULTI_CAP"
+                      action = "KEEP_AS_IS"
+                  elif (
+                      current_cap == embedded_cap
+                      and current_sigla != embedded_sigla
+                      and is_multi_sigla
+                  ):
+                      classification = "BOTH_VALID_MULTI_SIGLA"
+                      action = "KEEP_AS_IS"
+                  else:
+                      classification = "BOTH_VALID_REFERENCE_VARIANTS"
+                      action = "KEEP_AS_IS"
+              elif (
+                  current_cap_valid
+                  and not current_sigla_valid
+              ):
+                  classification = "SIGLA_INVALID_CAP_VALID"
+                  action = "CANDIDATE_FIX_SIGLA"
+              elif (
+                  current_sigla_valid
+                  and not current_cap_valid
+              ):
+                  classification = "CAP_INVALID_SIGLA_VALID"
+                  action = "CANDIDATE_FIX_CAP"
+              elif (
+                  not current_cap
+                  and current_sigla_valid
+              ):
+                  classification = "CAP_MISSING_SIGLA_VALID"
+                  action = "CANDIDATE_FILL_CAP"
+              elif (
+                  current_cap_valid
+                  and not current_sigla
+              ):
+                  classification = "SIGLA_MISSING_CAP_VALID"
+                  action = "CANDIDATE_FILL_SIGLA"
+              elif (
+                  not current_cap
+                  and not current_sigla
+              ):
+                  classification = "CAP_AND_SIGLA_MISSING"
+                  action = "CANDIDATE_FILL_ADMIN"
+              else:
+                  classification = "CURRENT_ADMIN_NOT_REFERENCE_VALID"
+                  action = "REVIEW"
+
+              # A canonical replacement is safe only when the reference gives
+              # one unambiguous value for the field being replaced.
+              proposed_cap = ""
+              proposed_sigla = ""
+
+              if action in {
+                  "CANDIDATE_FIX_CAP",
+                  "CANDIDATE_FILL_CAP",
+                  "CANDIDATE_FILL_ADMIN",
+              }:
+                  if len(valid_caps) == 1:
+                      proposed_cap = valid_caps[0]
+
+              if action in {
+                  "CANDIDATE_FIX_SIGLA",
+                  "CANDIDATE_FILL_SIGLA",
+                  "CANDIDATE_FILL_ADMIN",
+              }:
+                  if len(valid_sigle) == 1:
+                      proposed_sigla = valid_sigle[0]
+
+              auto_safe = False
+
+              if action == "CANDIDATE_FIX_CAP":
+                  auto_safe = bool(
+                      proposed_cap
+                      and current_sigla_valid
+                  )
+              elif action == "CANDIDATE_FIX_SIGLA":
+                  auto_safe = bool(
+                      proposed_sigla
+                      and current_cap_valid
+                  )
+              elif action == "CANDIDATE_FILL_CAP":
+                  auto_safe = bool(
+                      proposed_cap
+                      and current_sigla_valid
+                  )
+              elif action == "CANDIDATE_FILL_SIGLA":
+                  auto_safe = bool(
+                      proposed_sigla
+                      and current_cap_valid
+                  )
+              elif action == "CANDIDATE_FILL_ADMIN":
+                  auto_safe = bool(
+                      proposed_cap and proposed_sigla
+                  )
+
+              final_action = (
+                  "AUTO_SAFE_REFERENCE_FIX"
+                  if auto_safe
+                  else action
+              )
+
+              preview.append({
+                  "pvp_id": row.get("pvp_id"),
+                  "classification": classification,
+                  "action": final_action,
+                  "comune": current_comune,
+                  "provincia": row.get("provincia"),
+                  "current_cap": current_cap,
+                  "current_sigla": current_sigla,
+                  "embedded_cap": embedded_cap,
+                  "embedded_sigla": embedded_sigla,
+                  "embedded_via": embedded.get("via"),
+                  "current_indirizzo": row.get("indirizzo"),
+                  "valid_caps": " | ".join(valid_caps),
+                  "valid_sigle": " | ".join(valid_sigle),
+                  "valid_cap_count": len(valid_caps),
+                  "valid_sigla_count": len(valid_sigle),
+                  "current_pair_valid": current_pair_valid,
+                  "embedded_pair_valid": embedded_pair_valid,
+                  "current_cap_valid": current_cap_valid,
+                  "current_sigla_valid": current_sigla_valid,
+                  "is_multi_cap": is_multi_cap,
+                  "is_multi_sigla": is_multi_sigla,
+                  "proposed_cap": proposed_cap,
+                  "proposed_sigla": proposed_sigla,
+                  "geocode_status": row.get("geocode_status"),
+                  "geocode_source": row.get("geocode_source"),
+                  "geocode_precision": row.get("geocode_precision"),
+                  "latitudine": row.get("latitudine"),
+                  "longitudine": row.get("longitudine"),
+                  "maps_link": row.get("maps_link"),
+              })
+
+          if not preview:
+              raise RuntimeError(
+                  "No same-comune CAP/sigla conflicts detected"
+              )
+
+          class_counts = Counter(
+              x["classification"] for x in preview
+          )
+          action_counts = Counter(
+              x["action"] for x in preview
+          )
+
+          stamp = datetime.now(
+              timezone.utc
+          ).strftime("%Y%m%d-%H%M%S")
+
+          csv_path = (
+              OUTDIR
+              / f"historical_same_comune_admin_preview_{stamp}.csv"
+          )
+          json_path = (
+              OUTDIR
+              / f"historical_same_comune_admin_preview_{stamp}.json"
+          )
+          multi_path = (
+              OUTDIR
+              / f"historical_same_comune_admin_multiple_{stamp}.csv"
+          )
+
+          with csv_path.open(
+              "w",
+              encoding="utf-8-sig",
+              newline="",
+          ) as f:
+              writer = csv.DictWriter(
+                  f,
+                  fieldnames=list(preview[0]),
+              )
+              writer.writeheader()
+              writer.writerows(preview)
+
+          with multi_path.open(
+              "w",
+              encoding="utf-8-sig",
+              newline="",
+          ) as f:
+              cols = [
+                  "pvp_id",
+                  "indirizzo",
+                  "candidate_count",
+                  "candidates",
+              ]
+              writer = csv.DictWriter(f, fieldnames=cols)
+              writer.writeheader()
+              writer.writerows(multiple_candidate_rows)
+
+          report = {
+              "mode": "READ_ONLY_NO_WRITES",
+              "source_policy": (
+                  "CURRENT_DB_PLUS_PVP_EMBEDDED_PLUS_"
+                  "DETERMINISTIC_REFERENCE_ONLY"
+              ),
+              "created_at_utc": datetime.now(
+                  timezone.utc
+              ).isoformat(),
+              "total_listings_scanned": len(rows),
+              "same_comune_admin_conflicts": len(preview),
+              "multiple_candidate_rows": len(
+                  multiple_candidate_rows
+              ),
+              "classification_counts": dict(
+                  sorted(class_counts.items())
+              ),
+              "action_counts": dict(
+                  sorted(action_counts.items())
+              ),
+              "auto_safe_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "AUTO_SAFE_REFERENCE_FIX"
+              ],
+              "keep_as_is_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "KEEP_AS_IS"
+              ],
+              "review_ids": [
+                  str(x["pvp_id"])
+                  for x in preview
+                  if x["action"] == "REVIEW"
+              ],
+              "rows_detail": preview,
+          }
+
+          json_path.write_text(
+              json.dumps(
+                  report,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+
+          print()
+          print("[SUMMARY]")
+          print(json.dumps({
+              "mode": report["mode"],
+              "source_policy": report["source_policy"],
+              "total_listings_scanned": report[
+                  "total_listings_scanned"
+              ],
+              "same_comune_admin_conflicts": report[
+                  "same_comune_admin_conflicts"
+              ],
+              "multiple_candidate_rows": report[
+                  "multiple_candidate_rows"
+              ],
+              "classification_counts": report[
+                  "classification_counts"
+              ],
+              "action_counts": report["action_counts"],
+          }, ensure_ascii=False, indent=2))
+
+          print()
+          print("[AUTO_SAFE_REFERENCE_FIX]")
+          for rec in preview:
+              if rec["action"] == "AUTO_SAFE_REFERENCE_FIX":
+                  print(
+                      f"{rec['pvp_id']}: {rec['comune']} | "
+                      f"CAP {rec['current_cap']!r}->{rec['proposed_cap']!r} | "
+                      f"SIGLA {rec['current_sigla']!r}->{rec['proposed_sigla']!r} | "
+                      f"{rec['classification']}"
+                  )
+
+          print()
+          print("[KEEP_AS_IS_SAMPLE]")
+          shown = 0
+          for rec in preview:
+              if rec["action"] == "KEEP_AS_IS" and shown < 20:
+                  print(
+                      f"{rec['pvp_id']}: {rec['comune']} | "
+                      f"current={rec['current_cap']} {rec['current_sigla']} | "
+                      f"embedded={rec['embedded_cap']} {rec['embedded_sigla']} | "
+                      f"valid_caps={rec['valid_caps']}"
+                  )
+                  shown += 1
+
+          print()
+          print("[REVIEW]")
+          for rec in preview:
+              if rec["action"] == "REVIEW":
+                  print(
+                      f"{rec['pvp_id']}: {rec['comune']} | "
+                      f"current={rec['current_cap']} {rec['current_sigla']} | "
+                      f"embedded={rec['embedded_cap']} {rec['embedded_sigla']} | "
+                      f"valid_caps={rec['valid_caps']} | "
+                      f"valid_sigle={rec['valid_sigle']}"
+                  )
+
+          print()
+          print(
+              "[PASS] same-comune CAP/sigla conflicts classified "
+              "read-only"
+          )
+          PY
+
+      - name: Upload preview reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-same-comune-admin-preview-${{ github.run_id }}
+          path: runtime/reports/historical_same_comune_admin_*
+          if-no-files-found: error
+          retention-days: 14
