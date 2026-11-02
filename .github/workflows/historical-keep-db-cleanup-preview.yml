@@ -217,7 +217,13 @@ jobs:
 
               evidence_action = (
                   "KEEP_DB_CONFIRMED"
-                  if current_mentioned and not embedded_mentioned
+                  if (
+                      current_mentioned
+                      and not embedded_mentioned
+                      and builder.description_has_strong_location_context(
+                          full_description
+                      )
+                  )
                   else "REVIEW"
               )
 
