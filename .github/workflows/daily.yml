@@ -55,7 +55,7 @@ jobs:
 
       - name: Restore ANNCSU runtime index
         id: anncsu_restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: data/anncsu/anncsu_runtime.sqlite3
           key: ${{ env.ANNCSU_CACHE_KEY }}
@@ -105,14 +105,14 @@ jobs:
 
       - name: Save ANNCSU runtime index cache
         if: steps.anncsu_restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: data/anncsu/anncsu_runtime.sqlite3
           key: ${{ env.ANNCSU_CACHE_KEY }}
 
       - name: Restore ISTAT municipality boundaries
         id: istat_boundary_restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             data/reference/Limiti01012026.zip
@@ -148,7 +148,7 @@ jobs:
 
       - name: Save ISTAT municipality boundaries cache
         if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             data/reference/Limiti01012026.zip
@@ -157,7 +157,7 @@ jobs:
 
       - name: Restore mutable Aste Easy state
         id: runtime_restore
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: |
             runtime/cache
@@ -269,7 +269,7 @@ jobs:
 
       - name: Save mutable state for the next run
         if: always() && steps.state_verify.outcome == 'success'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: |
             runtime/cache
@@ -279,7 +279,7 @@ jobs:
 
       - name: Upload current-run reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aste-easy-reports-${{ github.run_id }}
           path: runtime/upload/runtime/reports
@@ -289,7 +289,7 @@ jobs:
 
       - name: Upload RAW payloads only on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aste-easy-raw-failure-${{ github.run_id }}
           path: runtime/raw
