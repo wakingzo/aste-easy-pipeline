@@ -262,6 +262,35 @@ def unique_reference_cap(
     )
 
 
+def reference_cap_is_valid_for_comune(
+    cap: Optional[str],
+    comune: Optional[str],
+    provincia: Optional[str],
+) -> bool:
+    if not cap or not comune or not provincia:
+        return False
+
+    cap_digits = "".join(
+        ch for ch in str(cap) if ch.isdigit()
+    )
+    if not cap_digits or len(cap_digits) > 5:
+        return False
+
+    cap_norm = cap_digits.zfill(5)
+
+    pinfo = PROVINCE_MAP.get(provincia.lower()) or {}
+    sigla = sanitize_text(pinfo.get("sigla_provincia"))
+
+    if not sigla:
+        return False
+
+    return (
+        cap_norm,
+        comune.lower(),
+        sigla.upper(),
+    ) in VALID_ADMIN_TRIPLES
+
+
 def lookup_geo(comune: Optional[str], provincia: Optional[str], cap: Optional[str]) -> Dict[str, Optional[str]]:
     result = {"regione": None, "sigla_provincia": None, "cap": cap}
 
@@ -758,10 +787,16 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     current_admin_cap_replaced = False
 
     if current_admin_confirmed and embedded_admin_candidate:
-        embedded_cap = sanitize_text(
-            embedded_admin_candidate.get("cap")
-        )
-        if embedded_cap and sanitize_text(cap) == embedded_cap:
+        if reference_cap_is_valid_for_comune(
+            cap,
+            comune,
+            provincia,
+        ):
+            cap_digits = "".join(
+                ch for ch in str(cap) if ch.isdigit()
+            )
+            cap = cap_digits.zfill(5)
+        else:
             cap = unique_reference_cap(comune, provincia)
             current_admin_cap_replaced = True
 
