@@ -145,12 +145,20 @@ def main():
                 "best":cand,
             })
             if cand and (best is None or cand["score"]>best["score"]): best=cand
-            # HIGH is enough for the mini-run; no need to spend a second/third call.
-            if cand and cand["score"]>=82: break
+            # For ordinary unresolved rows, HIGH is enough and we stop early.
+            # REVIEW rows are different: they exist because offline sources conflict,
+            # so every planned hypothesis must be evaluated before arbitration.
+            if clean(item.get("status"))!="REVIEW" and cand and cand["score"]>=82:
+                break
+        input_status=clean(item.get("status"))
+        if input_status=="REVIEW":
+            decision="ARBITRATION_READY" if best else "NO_GOOGLE_MATCH"
+        else:
+            decision="ACCEPT_HIGH" if best and best["score"]>=82 else ("CANDIDATE_REVIEW" if best else "NO_GOOGLE_MATCH")
         out.append({
-            "pvp_id":item.get("pvp_id"),"input_status":item.get("status"),
+            "pvp_id":item.get("pvp_id"),"input_status":input_status,
             "best":best,"attempts":attempts,
-            "decision":"ACCEPT_HIGH" if best and best["score"]>=82 else ("CANDIDATE_REVIEW" if best else "NO_GOOGLE_MATCH"),
+            "decision":decision,
         })
         if stopped_budget: break
 
