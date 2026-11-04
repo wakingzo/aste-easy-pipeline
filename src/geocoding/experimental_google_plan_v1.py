@@ -59,20 +59,23 @@ def plan_one(res,ann,loc,unified):
     qs=[]
 
     # 1) Best official ANNCSU odonym in the PVP municipality.
+    # An exact ISTAT locality is trusted context within the structured PVP comune.
+    # An embedded place different from the structured comune is instead a competing
+    # hypothesis and must NEVER be merged into the same Google query.
+    trusted_context=loc_name
+
     if ann_street:
         target=" ".join(x for x in (ann_street,civic) if x)
-        context=embedded or loc_name
-        add(qs,"ANNCSU_OFFICIAL", target+", "+suffix(comune,prov,context))
+        add(qs,"ANNCSU_OFFICIAL", target+", "+suffix(comune,prov,trusted_context))
         if civic:
-            add(qs,"ANNCSU_STREET_ONLY", ann_street+", "+suffix(comune,prov,context))
+            add(qs,"ANNCSU_STREET_ONLY", ann_street+", "+suffix(comune,prov,trusted_context))
 
     # 2) Parsed PVP address, preserving structured municipality.
     if street:
         target=" ".join(x for x in (street,civic) if x)
-        context=embedded or loc_name
-        add(qs,"PVP_PARSED", target+", "+suffix(comune,prov,context))
+        add(qs,"PVP_PARSED", target+", "+suffix(comune,prov,trusted_context))
         if civic:
-            add(qs,"PVP_STREET_ONLY", street+", "+suffix(comune,prov,context))
+            add(qs,"PVP_STREET_ONLY", street+", "+suffix(comune,prov,trusted_context))
 
     # 3) Exact locality point/name as a geography-oriented query.
     if loc_name:
@@ -80,8 +83,9 @@ def plan_one(res,ann,loc,unified):
 
     # 4) Embedded postal place may reveal structured-PVP contradiction.
     if embedded and norm(embedded)!=norm(comune):
-        if street:
-            target=" ".join(x for x in (street,civic) if x)
+        target_street=ann_street or street
+        if target_street:
+            target=" ".join(x for x in (target_street,civic) if x)
             add(qs,"EMBEDDED_PLACE", target+", "+suffix("",prov,embedded))
         else:
             add(qs,"EMBEDDED_PLACE_ONLY", embedded+", "+(prov+", Italia" if prov else "Italia"))
