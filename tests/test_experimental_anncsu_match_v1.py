@@ -13,3 +13,10 @@ def test_road_kind_mismatch_is_penalized():
 def test_preposition_difference_is_tolerated():
     s, _ = street_score("Via della Repubblica", "Via Repubblica")
     assert s >= 0.95
+
+
+def test_single_token_alias_requires_tail_match():
+    good, ev_good = street_score("Via Cavour", "Via Camillo Benso Conte di Cavour")
+    bad, ev_bad = street_score("Via S. Francesco", "Via Francesco Crispi")
+    assert good > 0.93 and ev_good["single_token_tail_ok"] is True
+    assert bad > 0.93 and ev_bad["single_token_tail_ok"] is False
