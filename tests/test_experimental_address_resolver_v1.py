@@ -51,3 +51,15 @@ def test_embedded_full_postal_address():
     p = parse_address("Via dell'Industria, 16, 00034 Colleferro RM, Italia")
     assert p["primary"]["street"].upper() == "VIA DELL'INDUSTRIA"
     assert p["primary"]["civic_for_geocode"] == "16"
+
+
+def test_snc_no_trailing_punctuation():
+    p = parse_address("Contrada Spalla, Snc, 96010 Melilli SR, Italia")
+    assert not (p["primary"]["street"] or "").endswith(",")
+    assert ", ," not in (p["primary"]["street"] or "")
+
+
+def test_embedded_postal_without_civic():
+    p = parse_address("Via Proserpina, 91100 Trapani TP, Italia")
+    assert p["primary"]["street"].upper() == "VIA PROSERPINA"
+    assert p["primary"]["civic_for_geocode"] is None
