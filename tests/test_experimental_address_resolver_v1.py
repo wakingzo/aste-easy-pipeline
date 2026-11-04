@@ -83,3 +83,15 @@ def test_slash_letter_civic():
     p = parse_address("via Nazionale, 25/A")
     assert p["primary"]["street"].upper() == "VIA NAZIONALE"
     assert p["primary"]["civic_for_geocode"] == "25/A"
+
+
+def test_embedded_postal_tail_without_civic_is_removed():
+    p = parse_address("Via Proserpina, 91100 Trapani TP, Italia")
+    assert p["primary"]["street"].upper() == "VIA PROSERPINA"
+    assert p["primary"]["civic_for_geocode"] is None
+
+
+def test_incrocio_con_drops_con():
+    p = parse_address("via dei Taurini incrocio con via Degli Uliveti")
+    assert p["is_intersection"] is True
+    assert p["secondary"]["street"].upper() == "VIA DEGLI ULIVETI"
