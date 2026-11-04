@@ -129,6 +129,8 @@ before update on public.listing_locations
 for each row
 execute function public.set_updated_at();
 
+alter table public.listing_locations enable row level security;
+
 comment on table public.listing_locations is
     'One row per auction bene/location. Stores parsed PVP address, resolved coordinates and compact geocoding provenance. public.listings retains only the primary map pin.';
 
