@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 SNC_RE = re.compile(r"\b(?:S\.?\s*N\.?\s*C\.?|SENZA\s+NUMERO\s+CIVICO)\b", re.I)
-INTERNAL_RE = re.compile(r"(?:[,;\s-]+)(?:INT(?:ERNO)?\.?|SCALA|PIANO)\s*[:.]?\s*([A-Z0-9/-]+)\b", re.I)
+INTERNAL_RE = re.compile(r"(?:[,;\s-]+)(?:INT(?:ERNO)?\.?|SCALA|PIANO|P\.)\s*[:.]?\s*([A-Z0-9/-]+)\b", re.I)
 HOUSE_RE = re.compile(
-    r"(?P<num>\d{1,5}(?:\s*[/\-]\s*\d{1,5})?(?:\s*(?:BIS|TER|QUATER|[A-Z]))?)"
-    r"(?=\s*(?:[,;.\-]|$|\bINT\b|\bINTERNO\b|\bSCALA\b|\bPIANO\b))",
+    r"(?P<num>\d{1,5}(?:\s*(?:/|-)\s*(?:\d{1,5}|BIS|TER|QUATER|[A-Z]))*(?:\s*(?:BIS|TER|QUATER|[A-Z]))?)"
+    r"(?=\s*(?:[,;.\-]|$|\bINT\b|\bINTERNO\b|\bSCALA\b|\bPIANO\b|\bP\.))",
     re.I,
 )
-ANGLE_SPLIT_RE = re.compile(r"\s*(?:,?\s*(?:ANG(?:OLO)?\.?|ANGOLO|INCROCIO|ALL['’]ANGOLO\s+CON)\s*)", re.I)
+ANGLE_SPLIT_RE = re.compile(r"\s*,?\s*(?<!\w)(?:ANG(?:OLO)?\.?|INCROCIO|ALL['’]ANGOLO\s+CON)(?!\w)\s*", re.I)
 SPACE_RE = re.compile(r"\s+")
 MULTI_CIVIC_RE = re.compile(r"^\s*(\d+)\s*(?:/|-)\s*(\d+)(.*)$", re.I)
 
@@ -101,18 +101,13 @@ def parse_single_street(raw: str) -> Dict[str, Any]:
 
     street, civic = work, None
 
-    # PVP sometimes puts a complete postal address inside the 'via' field:
-    # "Via X, 16, 00034 Comune PR, Italia". Strip the postal tail first;
-    # structured comune/provincia fields remain authoritative.
-    postal = re.match(r"^(.*?)(?:,\s*)?(\d{1,5}(?:\s*[/\-]\s*(?:\d{1,5}|BIS|TER|QUATER|[A-Z]))?(?:\s*(?:BIS|TER|QUATER|[A-Z]))?)?\s*,\s*\d{5}\b.*$", work, re.I)
-    if postal:
-        prefix = clean_text(postal.group(1)) or ""
-        postal_civic = clean_text(postal.group(2))
-        work = prefix.strip(" ,;- ")
-        if postal_civic:
-            civic = postal_civic.upper()
+    # PVP sometimes embeds CAP/comune/province in the 'via' field.
+    # Cut only the postal tail; the structured PVP comune/provincia remain authoritative.
+    postal_tail = re.search(r",\s*\d{5}\b.*$", work, re.I)
+    if postal_tail:
+        work = work[:postal_tail.start()].strip(" ,;- ")
 
-    matches = [] if civic else list(HOUSE_RE.finditer(work))
+    matches = list(HOUSE_RE.finditer(work))
     if matches:
         m = matches[-1]
         tail = work[m.end():].strip(" ,;.-")
