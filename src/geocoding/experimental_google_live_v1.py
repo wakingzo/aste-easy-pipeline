@@ -92,6 +92,43 @@ def rank_candidate(g,row,result,label,query):
         "score_details":scored,
     }
 
+def hav(a,b,c,d):
+    import math
+    if None in (a,b,c,d):return None
+    r=6371008.8
+    p1,p2=math.radians(float(a)),math.radians(float(c))
+    dp,dl=math.radians(float(c)-float(a)),math.radians(float(d)-float(b))
+    z=math.sin(dp/2)**2+math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2*r*math.asin(min(1.0,math.sqrt(z)))
+
+def arbitrate_review(attempts):
+    cands=[]
+    for a in attempts:
+        b=a.get("best")
+        if b and float(b.get("score") or 0)>=82:
+            cands.append(b)
+    if not cands:
+        return "NO_GOOGLE_MATCH",None,{}
+    cands.sort(key=lambda x:float(x.get("score") or 0),reverse=True)
+    top=cands[0]
+    if len(cands)==1:
+        return "ARBITRATION_WINNER",top,{"reason":"single_high_candidate"}
+
+    second=cands[1]
+    d=hav(top.get("lat"),top.get("lon"),second.get("lat"),second.get("lon"))
+    gap=float(top.get("score") or 0)-float(second.get("score") or 0)
+
+    # Different textual hypotheses that land on effectively the same place
+    # are consensus, not a conflict (e.g. comune vs frazione naming).
+    if d is not None and d<=250:
+        return "ARBITRATION_CONSENSUS",top,{"reason":"high_candidates_same_place","top_second_distance_m":round(d,1),"score_gap":round(gap,2)}
+
+    # A materially better HIGH candidate can win. Otherwise preserve REVIEW.
+    if gap>=8:
+        return "ARBITRATION_WINNER",top,{"reason":"score_gap","top_second_distance_m":round(d,1) if d is not None else None,"score_gap":round(gap,2)}
+
+    return "ARBITRATION_CONFLICT",None,{"reason":"competing_high_candidates","top_second_distance_m":round(d,1) if d is not None else None,"score_gap":round(gap,2),"top":top,"second":second}
+
 def selected_rows(plan,limit_rows):
     eligible=[x for x in plan if x.get("eligible") and x.get("queries")]
     pr={"REVIEW":0,"NEEDS_COORD":1,"UNRESOLVED":2}
@@ -151,14 +188,19 @@ def main():
             if clean(item.get("status"))!="REVIEW" and cand and cand["score"]>=82:
                 break
         input_status=clean(item.get("status"))
+        arbitration={}
         if input_status=="REVIEW":
-            decision="ARBITRATION_READY" if best else "NO_GOOGLE_MATCH"
+            decision,arb_best,arbitration=arbitrate_review(attempts)
+            if arb_best is not None:
+                best=arb_best
+            elif decision=="ARBITRATION_CONFLICT":
+                best=None
         else:
             decision="ACCEPT_HIGH" if best and best["score"]>=82 else ("CANDIDATE_REVIEW" if best else "NO_GOOGLE_MATCH")
         out.append({
             "pvp_id":item.get("pvp_id"),"input_status":input_status,
             "best":best,"attempts":attempts,
-            "decision":decision,
+            "decision":decision,"arbitration":arbitration,
         })
         if stopped_budget: break
 
@@ -182,6 +224,9 @@ def main():
             "best_formatted_address":b.get("formatted_address"),"best_query_label":b.get("query_label"),
             "best_query":b.get("query"),"hypothesis_comune":b.get("hypothesis_comune"),
             "attempt_count":len(x.get("attempts") or []),
+            "arbitration_reason":(x.get("arbitration") or {}).get("reason"),
+            "arbitration_distance_m":(x.get("arbitration") or {}).get("top_second_distance_m"),
+            "arbitration_score_gap":(x.get("arbitration") or {}).get("score_gap"),
         })
     if flat:
         with cp.open("w",encoding="utf-8-sig",newline="") as f:
