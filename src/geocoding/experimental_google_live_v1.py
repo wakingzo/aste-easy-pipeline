@@ -5,8 +5,8 @@ import argparse,csv,hashlib,importlib.util,json,os,re,sys
 from collections import Counter
 from pathlib import Path
 
-HERE=Path(__file__).resolve()
-SRC=HERE.parents[1]
+HERE=Path(__file__).resolve().parent
+SRC=HERE.parent
 ROOT=SRC.parent
 if str(SRC) not in sys.path: sys.path.insert(0,str(SRC))
 
