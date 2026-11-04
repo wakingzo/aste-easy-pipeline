@@ -45,12 +45,13 @@ def street_score(src,cand):
         return sc,{"mode":"EXACT_SIGNIFICANT"}
     inter=len(ss&cs); union=len(ss|cs) or 1
     jac=inter/union; covs=inter/max(1,len(ss)); seq=SequenceMatcher(None," ".join(st) or sn," ".join(ct) or cn).ratio()
+    single_tail_ok = bool(len(st)==1 and ct and st[0]==ct[-1])
     if ss and covs==1:
         sc=.90+.05*seq+.03*jac; mode="SOURCE_TOKENS_CONTAINED"
     else:
         sc=.58*seq+.42*jac; mode="FUZZY"
     if sk and ck: sc += .025 if sk==ck else -.10
-    return max(0,min(.999,sc)),{"mode":mode,"seq":round(seq,4),"jaccard":round(jac,4),"source_coverage":round(covs,4),"kind_source":sk,"kind_candidate":ck}
+    return max(0,min(.999,sc)),{"mode":mode,"seq":round(seq,4),"jaccard":round(jac,4),"source_coverage":round(covs,4),"source_token_count":len(st),"single_token_tail_ok":single_tail_ok,"kind_source":sk,"kind_candidate":ck}
 
 class DB:
     def __init__(self,path):
@@ -82,9 +83,12 @@ def match_street(db,code,src,topn=5):
     ranked.sort(key=lambda x:x["score"],reverse=True);ranked=ranked[:topn]
     if not ranked:return {"status":"NO_STREETS","candidates":[]}
     b=ranked[0];second=ranked[1]["score"] if len(ranked)>1 else 0;margin=b["score"]-second
+    ev=b.get("evidence") or {}
+    single_containment = ev.get("mode")=="SOURCE_TOKENS_CONTAINED" and ev.get("source_token_count")==1
+    single_safe = (not single_containment) or bool(ev.get("single_token_tail_ok"))
     if b["score"]>=.999:status="MATCH_EXACT"
-    elif b["score"]>=.93 and margin>=.06:status="MATCH_ALIAS_HIGH"
-    elif b["score"]>=.90 and margin>=.10:status="MATCH_ALIAS_HIGH"
+    elif b["score"]>=.93 and margin>=.06 and single_safe:status="MATCH_ALIAS_HIGH"
+    elif b["score"]>=.90 and margin>=.10 and single_safe:status="MATCH_ALIAS_HIGH"
     elif b["score"]>=.84:status="AMBIGUOUS"
     else:status="NO_SAFE_MATCH"
     return {"status":status,"best":b,"second_score":round(second,6),"margin":round(margin,6),"candidates":ranked}
