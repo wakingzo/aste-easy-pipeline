@@ -33,3 +33,21 @@ def test_coordinates():
     assert valid_coord(41.9, 12.5)[0] is True
     assert valid_coord(0, 0)[1] == "ZERO_ZERO"
     assert valid_coord(45.0, 9190000)[1] == "OUT_OF_RANGE"
+
+
+def test_n_prefix_not_stripped_from_name():
+    p = parse_address("Via Nicola Agresti 32")
+    assert p["primary"]["street"].upper() == "VIA NICOLA AGRESTI"
+    assert p["primary"]["civic_for_geocode"] == "32"
+
+
+def test_snc_label_cleanup():
+    p = parse_address("regione santa maria di castiglione, n. snc")
+    assert p["primary"]["street"].upper() == "REGIONE SANTA MARIA DI CASTIGLIONE"
+    assert p["primary"]["snc"] is True
+
+
+def test_embedded_full_postal_address():
+    p = parse_address("Via dell'Industria, 16, 00034 Colleferro RM, Italia")
+    assert p["primary"]["street"].upper() == "VIA DELL'INDUSTRIA"
+    assert p["primary"]["civic_for_geocode"] == "16"
