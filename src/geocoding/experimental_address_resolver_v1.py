@@ -224,6 +224,8 @@ def process_row(row: Dict[str, Any]) -> Dict[str, Any]:
         ok, coord_status = valid_coord(lat, lon)
         comune = clean_text(addr.get("descComune"))
         provincia = clean_text(addr.get("codProvincia") or addr.get("descProvincia"))
+        cod_comune_raw = re.sub(r"\D", "", clean_text(addr.get("codComune")) or "")
+        codice_istat = cod_comune_raw.zfill(6)[-6:] if cod_comune_raw else None
 
         records.append({
             "bene_index": idx,
@@ -239,6 +241,7 @@ def process_row(row: Dict[str, Any]) -> Dict[str, Any]:
             "cap": clean_text(addr.get("cap")),
             "comune": comune,
             "provincia": provincia,
+            "codice_istat": codice_istat,
             "regione": clean_text(addr.get("descRegione")),
             "lat_pvp": lat,
             "lon_pvp": lon,
@@ -288,6 +291,7 @@ def flatten(obj: Dict[str, Any]) -> Dict[str, Any]:
         "intersection_secondary": p.get("intersection_secondary"),
         "comune": p.get("comune"),
         "provincia": p.get("provincia"),
+        "codice_istat": p.get("codice_istat"),
         "lat_pvp": p.get("lat_pvp"),
         "lon_pvp": p.get("lon_pvp"),
         "coord_valid": p.get("coord_valid"),
