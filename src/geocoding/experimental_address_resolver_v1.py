@@ -94,12 +94,25 @@ def parse_single_street(raw: str) -> Dict[str, Any]:
     original = clean_text(raw) or ""
     work, internal = strip_internal(original)
     snc = bool(SNC_RE.search(work))
-    work = SNC_RE.sub(" ", work).strip(" ,;-")
-    work = re.sub(r"\\s*,\\s*,+", ", ", work).strip(" ,;-")
+    work = SNC_RE.sub(" ", work)
+    work = re.sub(r"(?:\\s*,\\s*){2,}", ", ", work)
+    work = re.sub(r"(?:\\s*,\\s*)+$", "", work).strip(" ,;- ")
     work = re.sub(r"\bN(?:UM(?:ERO)?)?\.?\s*", "", work, flags=re.I)
 
     street, civic = work, None
-    matches = list(HOUSE_RE.finditer(work))
+
+    # PVP sometimes puts a complete postal address inside the 'via' field:
+    # "Via X, 16, 00034 Comune PR, Italia". Strip the postal tail first;
+    # structured comune/provincia fields remain authoritative.
+    postal = re.match(r"^(.*?)(?:,\\s*)?(\\d{1,5}(?:\\s*[/\\-]\\s*(?:\\d{1,5}|BIS|TER|QUATER|[A-Z]))?(?:\\s*(?:BIS|TER|QUATER|[A-Z]))?)?\\s*,\\s*\\d{5}\\b.*$", work, re.I)
+    if postal:
+        prefix = clean_text(postal.group(1)) or ""
+        postal_civic = clean_text(postal.group(2))
+        work = prefix.strip(" ,;- ")
+        if postal_civic:
+            civic = postal_civic.upper()
+
+    matches = [] if civic else list(HOUSE_RE.finditer(work))
     if matches:
         m = matches[-1]
         tail = work[m.end():].strip(" ,;.-")
