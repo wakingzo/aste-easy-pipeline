@@ -25,12 +25,15 @@ def load(path):
 def add(qs,label,q):
     q=clean(q).strip(" ,")
     if not q:return
+    if re.search(r",\s*,", q):return
     k=norm(q)
     if not k:return
     if any(norm(x["query"])==k for x in qs):return
     qs.append({"label":label,"query":q})
 
 def suffix(comune,prov,embedded_place=None):
+    prov=clean(prov)
+    if prov in {"-","--","N/D","ND"}:prov=""
     parts=[]
     if embedded_place:parts.append(clean(embedded_place))
     if comune and norm(comune)!=norm(embedded_place):parts.append(clean(comune))
