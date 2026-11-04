@@ -29,6 +29,10 @@ HOUSE_RE = re.compile(
 ANGLE_SPLIT_RE = re.compile(r"\s*,?\s*(?<!\w)(?:ANG(?:OLO)?\.?|INCROCIO(?:\s+CON)?|ALL['’]ANGOLO\s+CON)(?!\w)\s*", re.I)
 SPACE_RE = re.compile(r"\s+")
 MULTI_CIVIC_RE = re.compile(r"^\s*(\d+)\s*(?:/|-)\s*(\d+)(.*)$", re.I)
+EMBEDDED_POSTAL_RE = re.compile(
+    r"\b(?P<cap>\d{5})\s+(?P<place>[^,]+?)\s+(?P<prov>[A-Z]{2})\s*,?\s*Italia\b",
+    re.I,
+)
 
 WEAK_TOKENS = {
     "DI","DEL","DELLA","DELLE","DEI","DEGLI","DA","DAL","DALLA","DE",
@@ -217,8 +221,10 @@ def choose_primary_bene(records: List[Dict[str, Any]]) -> Optional[int]:
 def process_row(row: Dict[str, Any]) -> Dict[str, Any]:
     records = []
     for idx, bene, addr in iter_beni(row):
-        parsed = parse_address(addr.get("via"))
+        raw_via = clean_text(addr.get("via"))
+        parsed = parse_address(raw_via)
         p = parsed["primary"]
+        embedded = EMBEDDED_POSTAL_RE.search(raw_via or "")
         coords = addr.get("coordinate") or {}
         lat, lon = coords.get("latitudine"), coords.get("longitudine")
         ok, coord_status = valid_coord(lat, lon)
@@ -230,7 +236,10 @@ def process_row(row: Dict[str, Any]) -> Dict[str, Any]:
         records.append({
             "bene_index": idx,
             "tipologia": clean_text(bene.get("descTipologiaBene") or bene.get("codTipologiaBene")),
-            "raw_via": clean_text(addr.get("via")),
+            "raw_via": raw_via,
+            "embedded_cap": embedded.group("cap") if embedded else None,
+            "embedded_place": clean_text(embedded.group("place")) if embedded else None,
+            "embedded_provincia": embedded.group("prov").upper() if embedded else None,
             "street": p.get("street"),
             "civic_raw": p.get("civic_raw"),
             "civic_for_geocode": p.get("civic_for_geocode"),
@@ -282,6 +291,9 @@ def flatten(obj: Dict[str, Any]) -> Dict[str, Any]:
         "multi_comune": obj.get("multi_comune"),
         "primary_bene_index": obj.get("primary_bene_index"),
         "raw_via": p.get("raw_via"),
+        "embedded_cap": p.get("embedded_cap"),
+        "embedded_place": p.get("embedded_place"),
+        "embedded_provincia": p.get("embedded_provincia"),
         "street": p.get("street"),
         "civic_raw": p.get("civic_raw"),
         "civic_for_geocode": p.get("civic_for_geocode"),
