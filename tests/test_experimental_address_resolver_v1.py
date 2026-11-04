@@ -95,3 +95,15 @@ def test_incrocio_con_drops_con():
     p = parse_address("via dei Taurini incrocio con via Degli Uliveti")
     assert p["is_intersection"] is True
     assert p["secondary"]["street"].upper() == "VIA DEGLI ULIVETI"
+
+
+def test_embedded_postal_tail_without_comma():
+    p = parse_address("Via Copernico, 5/29 07026 Olbia OT, Italia")
+    assert p["primary"]["street"].upper() == "VIA COPERNICO"
+    assert p["primary"]["civic_for_geocode"] == "5/29"
+
+
+def test_complete_address_is_not_duplicated_in_query():
+    p = parse_address("Via Orsini, Cesano Maderno MB, Italia")
+    qs = query_variants(p, "Cesano Maderno", "MB")
+    assert qs == ["Via Orsini, Cesano Maderno MB, Italia"]
