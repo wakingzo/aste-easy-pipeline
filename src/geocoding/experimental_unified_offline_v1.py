@@ -66,6 +66,10 @@ def choose(res,ann,loc):
             "precision":"CIVICO","confidence":"HIGH","status":"RESOLVED",
             "reason":"Civico trovato su strada ANNCSU riconosciuta nello stesso comune PVP."
         })
+        if "PVP_ANNCSU_CIVIC_CONFLICT" in warnings:
+            final["status"]="REVIEW"
+            final["confidence"]="MEDIUM"
+            final["reason"]+=" Conflitto >1 km con coordinate PVP: richiede arbitraggio esterno."
         if "ANNCSU_CIVIC_LOCALITY_CONFLICT" in warnings:
             final["status"]="REVIEW"
             final["confidence"]="MEDIUM"
@@ -121,6 +125,9 @@ def process(res,ann,loc):
         "comune":p.get("comune"),
         "codice_istat":p.get("codice_istat"),
         "raw_via":p.get("raw_via"),
+        "embedded_cap":p.get("embedded_cap"),
+        "embedded_place":p.get("embedded_place"),
+        "embedded_provincia":p.get("embedded_provincia"),
         "street":p.get("street"),
         "civic":p.get("civic_for_geocode"),
         "multi_address":(res or {}).get("multi_address"),
@@ -132,7 +139,7 @@ def flat(x):
     f=x["final"];e=x["evidence"];d=x["distances_m"]
     return {
         "pvp_id":x.get("pvp_id"),"comune":x.get("comune"),"codice_istat":x.get("codice_istat"),
-        "raw_via":x.get("raw_via"),"street":x.get("street"),"civic":x.get("civic"),
+        "raw_via":x.get("raw_via"),"embedded_cap":x.get("embedded_cap"),"embedded_place":x.get("embedded_place"),"embedded_provincia":x.get("embedded_provincia"),"street":x.get("street"),"civic":x.get("civic"),
         "multi_address":x.get("multi_address"),"multi_comune":x.get("multi_comune"),
         "final_status":f.get("status"),"final_source":f.get("source"),"final_precision":f.get("precision"),
         "final_confidence":f.get("confidence"),"final_lat":f.get("lat"),"final_lon":f.get("lon"),
