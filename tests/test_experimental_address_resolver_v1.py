@@ -63,3 +63,23 @@ def test_embedded_postal_without_civic():
     p = parse_address("Via Proserpina, 91100 Trapani TP, Italia")
     assert p["primary"]["street"].upper() == "VIA PROSERPINA"
     assert p["primary"]["civic_for_geocode"] is None
+
+
+def test_cangiani_not_intersection():
+    p = parse_address("Vico Cangiani Al Mercato, 23, 80133 Napoli NA, Italia")
+    assert p["is_intersection"] is False
+    assert p["primary"]["street"].upper() == "VICO CANGIANI AL MERCATO"
+    assert p["primary"]["civic_for_geocode"] == "23"
+
+
+def test_floor_abbreviation_not_civic():
+    p = parse_address("VIA NAZIONALE P.2")
+    assert p["primary"]["street"].upper() == "VIA NAZIONALE"
+    assert p["primary"]["internal"] == "2"
+    assert p["primary"]["civic_for_geocode"] is None
+
+
+def test_slash_letter_civic():
+    p = parse_address("via Nazionale, 25/A")
+    assert p["primary"]["street"].upper() == "VIA NAZIONALE"
+    assert p["primary"]["civic_for_geocode"] == "25/A"
