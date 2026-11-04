@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse,csv,hashlib,importlib.util,json,os,re,sys
+from collections import Counter
+from pathlib import Path
+
+HERE=Path(__file__).resolve()
+SRC=HERE.parents[1]
+ROOT=SRC.parent
+if str(SRC) not in sys.path: sys.path.insert(0,str(SRC))
+
+from project_env import load_project_env
+
+VERSION="experimental_google_live_v1"
+
+def clean(v):
+    return re.sub(r"\s+"," ",str(v or "").replace("\xa0"," ")).strip()
+
+def load_jsonl(path):
+    rows=[]
+    with Path(path).open(encoding="utf-8") as f:
+        for line in f:
+            if line.strip(): rows.append(json.loads(line))
+    return rows
+
+def load_core(run_cap,monthly_cap):
+    load_project_env(required=("GOOGLE_GEOCODING_API_KEY",))
+    if not os.environ.get("GOOGLE_GEOCODING_API_KEY","").strip():
+        raise RuntimeError("GOOGLE_GEOCODING_API_KEY mancante")
+    os.environ["MAX_RUN_GEOCODING_CALLS"]=str(run_cap)
+    os.environ["MAX_MONTH_GEOCODING_CALLS"]=str(monthly_cap)
+    os.environ["HTTP_RETRIES"]="1"
+    os.environ["API_USAGE_SAVE_EVERY"]="1"
+    os.environ["PLACES_AUTOCOMPLETE_FALLBACK"]="0"
+    os.environ["ADDRESS_VALIDATION_FALLBACK"]="0"
+    path=HERE/"google_geocode_core_v9_3_6.py"
+    spec=importlib.util.spec_from_file_location("experimental_google_core_v936",path)
+    g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
+    if not g.CACHE_FILE.is_file():
+        raise RuntimeError("Cache Google esistente obbligatoria: "+str(g.CACHE_FILE))
+    if not g.API_USAGE_FILE.is_file():
+        raise RuntimeError("Contatore Google esistente obbligatorio: "+str(g.API_USAGE_FILE))
+    g.API_USAGE=g.ApiUsageTracker(g.API_USAGE_FILE)
+    return g
+
+def street_core(ctx):
+    street=clean(ctx.get("anncsu_odonimo") or ctx.get("street"))
+    civic=clean(ctx.get("civic"))
+    return " ".join(x for x in (street,civic) if x)
+
+def hypothesis_row(item,q):
+    ctx=item.get("context") or {}
+    label=clean(q.get("label"))
+    embedded=clean(ctx.get("embedded_place"))
+    comune=embedded if label.startswith("EMBEDDED_PLACE") and embedded else clean(ctx.get("comune"))
+    prov=clean(ctx.get("provincia"))
+    if prov in {"-","--","N/D","ND"}: prov=""
+    indirizzo=street_core(ctx)
+    if label=="ISTAT_LOCALITY_NAME":
+        indirizzo=clean(ctx.get("locality_name"))
+    return {
+        "pvp_id":item.get("pvp_id"),
+        "indirizzo":indirizzo or clean(q.get("query")),
+        "comune":comune,
+        "sigla_provincia":prov,
+        "provincia":prov,
+        "cap":"",
+    }
+
+def rank_candidate(g,row,result,label,query):
+    scored=g.score_forward_candidate(row,result,locality_fallback=(label=="ISTAT_LOCALITY_NAME"))
+    if not scored:return None
+    score=float(scored.get("score") or 0)
+    if result.get("partial_match"): score-=8
+    lt=clean(result.get("location_type")).upper()
+    # A street-only query should not be presented as civic precision.
+    requested_civic=bool(re.search(r"\b\d+[A-Za-z]?(?:[/\-]\w+)?\b", clean(row.get("indirizzo"))))
+    precision="CIVICO" if requested_civic and lt in {"ROOFTOP","RANGE_INTERPOLATED"} else "STRADA"
+    if label=="ISTAT_LOCALITY_NAME": precision="LOCALITA"
+    return {
+        "score":round(score,2),
+        "confidence":"HIGH" if score>=82 else ("MEDIUM" if score>=72 else "LOW"),
+        "precision":precision,
+        "lat":result.get("lat"),"lon":result.get("lon"),
+        "formatted_address":result.get("formatted_address"),
+        "location_type":lt,
+        "partial_match":bool(result.get("partial_match")),
+        "place_id":result.get("place_id"),
+        "query_label":label,"query":query,
+        "hypothesis_comune":row.get("comune"),
+        "score_details":scored,
+    }
+
+def selected_rows(plan,limit_rows):
+    eligible=[x for x in plan if x.get("eligible") and x.get("queries")]
+    pr={"REVIEW":0,"NEEDS_COORD":1,"UNRESOLVED":2}
+    eligible.sort(key=lambda x:(pr.get(clean(x.get("status")),9),hashlib.sha256(str(x.get("pvp_id")).encode()).hexdigest()))
+    return eligible[:limit_rows] if limit_rows else eligible
+
+def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument("plan_jsonl",type=Path)
+    ap.add_argument("--run-cap",type=int,default=30,help="Massimo tentativi HTTP Google Geocoding in questa esecuzione")
+    ap.add_argument("--monthly-cap",type=int,default=9000)
+    ap.add_argument("--max-rows",type=int,default=30)
+    ap.add_argument("--out-dir",type=Path,default=Path("runtime/reports"))
+    args=ap.parse_args()
+    if not 1<=args.run_cap<=200: raise SystemExit("--run-cap deve essere 1..200")
+    if args.monthly_cap<args.run_cap: raise SystemExit("--monthly-cap deve essere >= --run-cap")
+
+    plan=load_jsonl(args.plan_jsonl)
+    todo=selected_rows(plan,args.max_rows)
+    g=load_core(args.run_cap,args.monthly_cap)
+    cache=g.CacheStore(g.CACHE_FILE)
+
+    out=[]
+    stopped_budget=False
+    for item in todo:
+        attempts=[];best=None
+        for q in item.get("queries") or []:
+            label=clean(q.get("label"));query=clean(q.get("query"))
+            row=hypothesis_row(item,q)
+            try:
+                results=g.google_forward(query,cache)
+            except g.ApiBudgetExceeded:
+                stopped_budget=True
+                attempts.append({"label":label,"query":query,"outcome":"BUDGET_STOP"})
+                break
+            except Exception as e:
+                attempts.append({"label":label,"query":query,"outcome":"ERROR","error":f"{type(e).__name__}: {e}"})
+                stopped_budget=True
+                break
+
+            ranked=[]
+            for result in results:
+                rc=rank_candidate(g,row,result,label,query)
+                if rc: ranked.append(rc)
+            ranked.sort(key=lambda x:x["score"],reverse=True)
+            cand=ranked[0] if ranked else None
+            attempts.append({
+                "label":label,"query":query,
+                "outcome":"CANDIDATE" if cand else ("ZERO_RESULTS" if not results else "REJECTED"),
+                "google_results":len(results),
+                "best":cand,
+            })
+            if cand and (best is None or cand["score"]>best["score"]): best=cand
+            # HIGH is enough for the mini-run; no need to spend a second/third call.
+            if cand and cand["score"]>=82: break
+        out.append({
+            "pvp_id":item.get("pvp_id"),"input_status":item.get("status"),
+            "best":best,"attempts":attempts,
+            "decision":"ACCEPT_HIGH" if best and best["score"]>=82 else ("CANDIDATE_REVIEW" if best else "NO_GOOGLE_MATCH"),
+        })
+        if stopped_budget: break
+
+    cache.save();g.API_USAGE.save()
+
+    args.out_dir.mkdir(parents=True,exist_ok=True)
+    jp=args.out_dir/"experimental_google_live_v1.jsonl"
+    cp=args.out_dir/"experimental_google_live_v1.csv"
+    sp=args.out_dir/"experimental_google_live_v1_stats.json"
+
+    with jp.open("w",encoding="utf-8") as f:
+        for x in out:f.write(json.dumps(x,ensure_ascii=False)+"\n")
+
+    flat=[]
+    for x in out:
+        b=x.get("best") or {}
+        flat.append({
+            "pvp_id":x.get("pvp_id"),"input_status":x.get("input_status"),"decision":x.get("decision"),
+            "best_score":b.get("score"),"best_confidence":b.get("confidence"),"best_precision":b.get("precision"),
+            "best_lat":b.get("lat"),"best_lon":b.get("lon"),"best_location_type":b.get("location_type"),
+            "best_formatted_address":b.get("formatted_address"),"best_query_label":b.get("query_label"),
+            "best_query":b.get("query"),"hypothesis_comune":b.get("hypothesis_comune"),
+            "attempt_count":len(x.get("attempts") or []),
+        })
+    if flat:
+        with cp.open("w",encoding="utf-8-sig",newline="") as f:
+            w=csv.DictWriter(f,fieldnames=list(flat[0]));w.writeheader();w.writerows(flat)
+
+    usage=g.API_USAGE.run["geocoding"]
+    stats={
+        "version":VERSION,"planned_rows":len(todo),"processed_rows":len(out),
+        "run_cap":args.run_cap,"monthly_cap":args.monthly_cap,
+        "network_attempts":usage.get("network_attempts",0),"cache_hits":usage.get("cache_hits",0),
+        "logical_requests":usage.get("logical_requests",0),"budget_stopped":stopped_budget,
+        "input_status":dict(Counter(x.get("input_status") for x in out)),
+        "decision":dict(Counter(x.get("decision") for x in out)),
+        "best_precision":dict(Counter((x.get("best") or {}).get("precision","NONE") for x in out)),
+    }
+    local,offset,effective=g.API_USAGE.month_usage("geocoding")
+    stats["month_usage"]={"local":local,"external_offset":offset,"effective":effective,"remaining_under_cap":max(0,args.monthly_cap-effective)}
+    sp.write_text(json.dumps(stats,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
+    print(json.dumps(stats,ensure_ascii=False,indent=2))
+    print("[OUT]",jp);print("[OUT]",cp);print("[OUT]",sp)
+
+if __name__=="__main__":main()
