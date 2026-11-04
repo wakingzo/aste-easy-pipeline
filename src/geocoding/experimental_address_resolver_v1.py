@@ -103,7 +103,7 @@ def parse_single_street(raw: str) -> Dict[str, Any]:
 
     # PVP sometimes embeds CAP/comune/province in the 'via' field.
     # Cut only the postal tail; the structured PVP comune/provincia remain authoritative.
-    postal_tail = re.search(r",\s*\d{5}\b.*$", work, re.I)
+    postal_tail = re.search(r"(?:,\s*|\s+)\d{5}\b.*$", work, re.I)
     if postal_tail:
         work = work[:postal_tail.start()].strip(" ,;- ")
         street = work
@@ -153,9 +153,17 @@ def query_variants(parsed: Dict[str, Any], comune: Optional[str], provincia: Opt
         street = obj["street"]
         civic = obj.get("civic_for_geocode")
         full = " ".join(x for x in [street, civic] if x)
-        out.append(f"{full}, {suffix}" if suffix else full)
-        if civic:
-            out.append(f"{street}, {suffix}" if suffix else street)
+
+        # Some PVP bene addresses already contain locality/province/country in 'via'.
+        # In that case keep the complete address as one candidate and do not append
+        # the structured suffix again (which would create "... Italia, Comune, XX, Italia").
+        already_complete = bool(re.search(r"\bITALIA\s*$", norm_for_compare(full), re.I))
+        if already_complete:
+            out.append(full)
+        else:
+            out.append(f"{full}, {suffix}" if suffix else full)
+            if civic:
+                out.append(f"{street}, {suffix}" if suffix else street)
 
     add(parsed.get("primary"))
     if parsed.get("is_intersection"):
