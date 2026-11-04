@@ -26,7 +26,7 @@ HOUSE_RE = re.compile(
     r"(?=\s*(?:[,;.\-]|$|\bINT\b|\bINTERNO\b|\bSCALA\b|\bPIANO\b|\bP\.))",
     re.I,
 )
-ANGLE_SPLIT_RE = re.compile(r"\s*,?\s*(?<!\w)(?:ANG(?:OLO)?\.?|INCROCIO|ALL['’]ANGOLO\s+CON)(?!\w)\s*", re.I)
+ANGLE_SPLIT_RE = re.compile(r"\s*,?\s*(?<!\w)(?:ANG(?:OLO)?\.?|INCROCIO(?:\s+CON)?|ALL['’]ANGOLO\s+CON)(?!\w)\s*", re.I)
 SPACE_RE = re.compile(r"\s+")
 MULTI_CIVIC_RE = re.compile(r"^\s*(\d+)\s*(?:/|-)\s*(\d+)(.*)$", re.I)
 
@@ -106,6 +106,7 @@ def parse_single_street(raw: str) -> Dict[str, Any]:
     postal_tail = re.search(r",\s*\d{5}\b.*$", work, re.I)
     if postal_tail:
         work = work[:postal_tail.start()].strip(" ,;- ")
+        street = work
 
     matches = list(HOUSE_RE.finditer(work))
     if matches:
