@@ -25,7 +25,8 @@ def test_intersection():
 def test_multi_civic_representative():
     assert first_civic_component("55-56") == "55"
     assert first_civic_component("43/45") == "43"
-    assert first_civic_component("171/A") == "171"
+    assert first_civic_component("171/A") == "171/A"
+    assert first_civic_component("289/TER") == "289/TER"
 
 
 def test_coordinates():
