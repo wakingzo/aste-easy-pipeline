@@ -172,7 +172,7 @@ def main(argv=None):
             "timings_seconds":{**timings,"total":round(time.perf_counter()-total,3)},
         }
         out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if args.apply else "experimental_daily_v4_preview.json")
-        out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\\n",encoding="utf-8")
+        out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
         print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
         print("[OUT]",out,flush=True)
         return 0
@@ -234,7 +234,7 @@ def main(argv=None):
 
     summary={
         "version":VERSION,
-        "mode":"PREVIEW_ZERO_DB_WRITES",
+        "mode":"APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
         "created_at":datetime.now().astimezone().isoformat(),
         "build_summary":build_summary,
         "raw_window_rows":preplan.get("incoming_unique"),
@@ -259,7 +259,7 @@ def main(argv=None):
         "google_calls":0,
         "timings_seconds":timings,
     }
-    out=Path(REPORTS_DIR)/"experimental_daily_v4_preview.json"
+    out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if args.apply else "experimental_daily_v4_preview.json")
     out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
     print("[OUT]",out,flush=True)
