@@ -20,6 +20,7 @@ import pvp_import_atomic_v2 as importer_v2
 
 VERSION="experimental_daily_v4_preview"
 RAW=Path(RAW_DIR)/"listings_api_raw.jsonl"
+DELTA_RAW=Path(RAW_DIR)/"listings_api_raw_delta_v4.jsonl"
 RESOLVER=Path(REPORTS_DIR)/"experimental_address_resolver_v1.jsonl"
 ANNCSU=Path(REPORTS_DIR)/"experimental_anncsu_match_v1.jsonl"
 LOCALITY=Path(REPORTS_DIR)/"experimental_locality_match_v1.jsonl"
@@ -36,6 +37,27 @@ def _run(label,args):
 
 def _read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+
+def _write_delta_raw(source_path, dest_path, wanted_ids):
+    wanted={str(x) for x in wanted_ids}
+    found=set()
+    rows=0
+    tmp=dest_path.with_suffix(dest_path.suffix+".tmp")
+    with source_path.open("r",encoding="utf-8",errors="replace") as src, tmp.open("w",encoding="utf-8") as out:
+        for line in src:
+            if not line.strip():
+                continue
+            obj=json.loads(line)
+            pid=str(obj.get("pvp_id") or "")
+            if pid in wanted:
+                out.write(json.dumps(obj,ensure_ascii=False)+"\\n")
+                found.add(pid)
+                rows += 1
+    if found != wanted:
+        missing=sorted(wanted-found)
+        raise RuntimeError("Delta RAW missing planned pvp_id(s): "+",".join(missing[:20]))
+    tmp.replace(dest_path)
+    return {"wanted_ids":len(wanted),"rows":rows}
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Aste Easy experimental daily v4 preview; zero DB writes")
@@ -63,8 +85,37 @@ def main(argv=None):
     importer_v2.assert_rpc_available()
 
     timings={"pvp_build":build_sec}
-    timings["resolver"]=_run("address resolver",[
-        SRC/"geocoding"/"experimental_address_resolver_v1.py",RAW
+
+    # First read-only plan: determine exactly which RAW IDs are truly new/eligible
+    # using the validated importer rules (DB presence, retention/date and admin gates).
+    t=time.perf_counter()
+    preplan=importer_v2.build_plan()
+    timings["delta_plan"]=round(time.perf_counter()-t,3)
+    eligible_ids=[str(r[0]["pvp_id"]) for r in preplan["records"]]
+    delta_meta=_write_delta_raw(RAW,DELTA_RAW,eligible_ids)
+
+    if not eligible_ids:
+        summary={
+            "version":VERSION,
+            "mode":"PREVIEW_ZERO_DB_WRITES",
+            "created_at":datetime.now().astimezone().isoformat(),
+            "build_summary":build_summary,
+            "raw_window_rows":preplan.get("incoming_unique"),
+            "eligible_delta":0,
+            "delta_raw_rows":0,
+            "eligible_new":0,
+            "db_writes":0,
+            "google_calls":0,
+            "timings_seconds":{**timings,"total":round(time.perf_counter()-total,3)},
+        }
+        out=Path(REPORTS_DIR)/"experimental_daily_v4_preview.json"
+        out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\\n",encoding="utf-8")
+        print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
+        print("[OUT]",out,flush=True)
+        return 0
+
+    timings["resolver"]=_run("address resolver DELTA",[
+        SRC/"geocoding"/"experimental_address_resolver_v1.py",DELTA_RAW
     ])
     timings["anncsu"]=_run("ANNCSU matcher",[
         SRC/"geocoding"/"experimental_anncsu_match_v1.py",RESOLVER
@@ -95,7 +146,12 @@ def main(argv=None):
         "mode":"PREVIEW_ZERO_DB_WRITES",
         "created_at":datetime.now().astimezone().isoformat(),
         "build_summary":build_summary,
-        "raw_rows":location_stats.get("listings"),
+        "raw_window_rows":preplan.get("incoming_unique"),
+        "raw_existing_in_db":preplan.get("existing"),
+        "raw_new_candidates":preplan.get("new_candidates"),
+        "eligible_delta":len(eligible_ids),
+        "delta_raw_rows":delta_meta.get("rows"),
+        "resolved_delta_rows":location_stats.get("listings"),
         "location_rows":location_stats.get("location_rows"),
         "offline_final_status":unified_stats.get("final_status"),
         "offline_final_source":unified_stats.get("final_source"),
