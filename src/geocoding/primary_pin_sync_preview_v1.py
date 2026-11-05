@@ -116,6 +116,7 @@ def main(argv=None):
     coord_distance_bins={"<=25m":0,"25-100m":0,"100-500m":0,"500m-1km":0,"1-5km":0,">5km":0,"OLD_MISSING":0}
     coord_source_counts={}
     coord_precision_counts={}
+    source_distance_bins={}
     unresolved=0
     review=0
     missing_parent=0
@@ -150,19 +151,22 @@ def main(argv=None):
             coord_precision_counts[prec]=coord_precision_counts.get(prec,0)+1
             distance_m=_distance_m(parent.get("latitudine"),parent.get("longitudine"),lat,lon)
             if distance_m is None:
-                coord_distance_bins["OLD_MISSING"] += 1
+                distance_bin="OLD_MISSING"
             elif distance_m <= 25:
-                coord_distance_bins["<=25m"] += 1
+                distance_bin="<=25m"
             elif distance_m <= 100:
-                coord_distance_bins["25-100m"] += 1
+                distance_bin="25-100m"
             elif distance_m <= 500:
-                coord_distance_bins["100-500m"] += 1
+                distance_bin="100-500m"
             elif distance_m <= 1000:
-                coord_distance_bins["500m-1km"] += 1
+                distance_bin="500m-1km"
             elif distance_m <= 5000:
-                coord_distance_bins["1-5km"] += 1
+                distance_bin="1-5km"
             else:
-                coord_distance_bins[">5km"] += 1
+                distance_bin=">5km"
+            coord_distance_bins[distance_bin] += 1
+            source_distance_bins.setdefault(src,{"<=25m":0,"25-100m":0,"100-500m":0,"500m-1km":0,"1-5km":0,">5km":0,"OLD_MISSING":0})
+            source_distance_bins[src][distance_bin] += 1
         changes.append({
             "pvp_id":str(loc.get("pvp_id")),
             "listing_id":loc.get("listing_id"),
@@ -197,6 +201,7 @@ def main(argv=None):
         "coordinate_distance_bins":coord_distance_bins,
         "coordinate_change_sources":dict(sorted(coord_source_counts.items())),
         "coordinate_change_precisions":dict(sorted(coord_precision_counts.items())),
+        "source_distance_bins":{k:source_distance_bins[k] for k in sorted(source_distance_bins)},
         "non_publishable_primary":unresolved,
         "review_primary":review,
         "missing_parent":missing_parent,
