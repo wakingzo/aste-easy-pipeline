@@ -74,6 +74,17 @@ def _same(a,b,eps=1e-7):
 def maps_link(lat,lon):
     return f"https://www.google.com/maps?q={lat},{lon}"
 
+def _distance_m(lat1,lon1,lat2,lon2):
+    vals=[_f(lat1),_f(lon1),_f(lat2),_f(lon2)]
+    if any(v is None for v in vals):
+        return None
+    a,b,c,d=vals
+    r=6371008.8
+    p1,p2=math.radians(a),math.radians(c)
+    dp=math.radians(c-a); dl=math.radians(d-b)
+    z=math.sin(dp/2)**2+math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return 2*r*math.asin(min(1.0,math.sqrt(z)))
+
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Preview primary pin publication from listing_locations to listings")
     ap.add_argument("--sample",type=int,default=25)
@@ -102,6 +113,9 @@ def main(argv=None):
     coord_changes=0
     link_only_changes=0
     publishable=0
+    coord_distance_bins={"<=25m":0,"25-100m":0,"100-500m":0,"500m-1km":0,"1-5km":0,">5km":0,"OLD_MISSING":0}
+    coord_source_counts={}
+    coord_precision_counts={}
     unresolved=0
     review=0
     missing_parent=0
@@ -125,10 +139,30 @@ def main(argv=None):
         if coords_same and link_same:
             exact += 1
             continue
+        distance_m=None
         if coords_same:
             link_only_changes += 1
         else:
             coord_changes += 1
+            src=str(loc.get("source") or "NONE")
+            prec=str(loc.get("precision") or "NONE")
+            coord_source_counts[src]=coord_source_counts.get(src,0)+1
+            coord_precision_counts[prec]=coord_precision_counts.get(prec,0)+1
+            distance_m=_distance_m(parent.get("latitudine"),parent.get("longitudine"),lat,lon)
+            if distance_m is None:
+                coord_distance_bins["OLD_MISSING"] += 1
+            elif distance_m <= 25:
+                coord_distance_bins["<=25m"] += 1
+            elif distance_m <= 100:
+                coord_distance_bins["25-100m"] += 1
+            elif distance_m <= 500:
+                coord_distance_bins["100-500m"] += 1
+            elif distance_m <= 1000:
+                coord_distance_bins["500m-1km"] += 1
+            elif distance_m <= 5000:
+                coord_distance_bins["1-5km"] += 1
+            else:
+                coord_distance_bins[">5km"] += 1
         changes.append({
             "pvp_id":str(loc.get("pvp_id")),
             "listing_id":loc.get("listing_id"),
@@ -141,6 +175,7 @@ def main(argv=None):
             "confidence":loc.get("confidence"),
             "resolver_version":loc.get("resolver_version"),
             "change_type":"LINK_ONLY" if coords_same else "COORDS",
+            "distance_m":round(distance_m,1) if distance_m is not None else None,
         })
 
     digest=hashlib.sha256(
@@ -159,6 +194,9 @@ def main(argv=None):
         "would_update":len(changes),
         "coordinate_changes":coord_changes,
         "maps_link_only_changes":link_only_changes,
+        "coordinate_distance_bins":coord_distance_bins,
+        "coordinate_change_sources":dict(sorted(coord_source_counts.items())),
+        "coordinate_change_precisions":dict(sorted(coord_precision_counts.items())),
         "non_publishable_primary":unresolved,
         "review_primary":review,
         "missing_parent":missing_parent,
