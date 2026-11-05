@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
@@ -44,8 +45,12 @@ def rpc_validate(base,key,pvp_id,locations):
         "Content-Type":"application/json",
         "Accept":"application/json",
     })
-    with urlopen(req,timeout=120) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(req,timeout=120) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail=exc.read().decode("utf-8",errors="replace")
+        raise RuntimeError(f"Validator RPC failed HTTP {exc.code}: {detail[:2000]}") from exc
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Validate resolver location writer with rollback")
