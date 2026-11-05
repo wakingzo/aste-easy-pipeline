@@ -99,6 +99,8 @@ def main(argv=None):
     by_listing={str(x["listing_id"]):x for x in listings}
     changes=[]
     exact=0
+    coord_changes=0
+    link_only_changes=0
     publishable=0
     unresolved=0
     review=0
@@ -118,10 +120,15 @@ def main(argv=None):
             continue
         publishable += 1
         target_link=maps_link(lat,lon)
-        same=_same(parent.get("latitudine"),lat) and _same(parent.get("longitudine"),lon) and str(parent.get("maps_link") or "")==target_link
-        if same:
+        coords_same=_same(parent.get("latitudine"),lat) and _same(parent.get("longitudine"),lon)
+        link_same=str(parent.get("maps_link") or "")==target_link
+        if coords_same and link_same:
             exact += 1
             continue
+        if coords_same:
+            link_only_changes += 1
+        else:
+            coord_changes += 1
         changes.append({
             "pvp_id":str(loc.get("pvp_id")),
             "listing_id":loc.get("listing_id"),
@@ -133,6 +140,7 @@ def main(argv=None):
             "precision":loc.get("precision"),
             "confidence":loc.get("confidence"),
             "resolver_version":loc.get("resolver_version"),
+            "change_type":"LINK_ONLY" if coords_same else "COORDS",
         })
 
     digest=hashlib.sha256(
@@ -149,6 +157,8 @@ def main(argv=None):
         "publishable_resolved_primary":publishable,
         "already_exact":exact,
         "would_update":len(changes),
+        "coordinate_changes":coord_changes,
+        "maps_link_only_changes":link_only_changes,
         "non_publishable_primary":unresolved,
         "review_primary":review,
         "missing_parent":missing_parent,
