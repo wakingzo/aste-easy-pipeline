@@ -6,8 +6,12 @@ import json
 import subprocess
 import sys
 import time
+import os
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 SRC = Path(__file__).resolve().parents[1]
 for p in (SRC, SRC/"pipeline", SRC/"importer", SRC/"geocoding", SRC/"audit"):
@@ -38,6 +42,62 @@ def _run(label,args):
 def _read_json(path):
     return json.loads(Path(path).read_text(encoding="utf-8-sig"))
 
+def _get_json(base,key,path,params):
+    url=base.rstrip("/")+"/rest/v1/"+path+"?"+urlencode(params,safe="(),.*")
+    req=Request(url,method="GET",headers={
+        "apikey":key,
+        "Authorization":"Bearer "+key,
+        "Accept":"application/json",
+    })
+    with urlopen(req,timeout=120) as response:
+        return json.loads(response.read().decode("utf-8") or "[]")
+
+def _verify_imported_locations(plan):
+    base=os.environ["SUPABASE_URL"].rstrip("/")
+    key=os.environ["SUPABASE_SERVICE_ROLE"]
+    expected={str(r[0]["pvp_id"]):len(r[3]) for r in plan["records"]}
+    ids=list(expected)
+    seen_listings=set()
+    location_counts=Counter()
+    primary_counts=Counter()
+
+    for start in range(0,len(ids),50):
+        batch=ids[start:start+50]
+        filt="in.("+",".join(batch)+")"
+        listings=_get_json(base,key,"listings",{
+            "select":"pvp_id",
+            "pvp_id":filt,
+        })
+        for row in listings:
+            seen_listings.add(str(row.get("pvp_id") or ""))
+
+        locations=_get_json(base,key,"listing_locations",{
+            "select":"pvp_id,is_primary",
+            "pvp_id":filt,
+        })
+        for row in locations:
+            pid=str(row.get("pvp_id") or "")
+            location_counts[pid]+=1
+            if row.get("is_primary") is True:
+                primary_counts[pid]+=1
+
+    missing=sorted(set(ids)-seen_listings)
+    bad_locations=sorted(pid for pid in ids if location_counts[pid] != expected[pid])
+    bad_primary=sorted(pid for pid in ids if primary_counts[pid] != 1)
+    if missing or bad_locations or bad_primary:
+        raise RuntimeError(
+            "Post-import verification failed: "
+            f"missing_listings={missing[:10]} "
+            f"bad_location_counts={bad_locations[:10]} "
+            f"bad_primary_counts={bad_primary[:10]}"
+        )
+    return {
+        "status":"PASS",
+        "listings_verified":len(ids),
+        "location_rows_verified":sum(location_counts.values()),
+        "one_primary_per_listing":len(ids),
+    }
+
 def _write_delta_raw(source_path, dest_path, wanted_ids):
     wanted={str(x) for x in wanted_ids}
     found=set()
@@ -60,7 +120,10 @@ def _write_delta_raw(source_path, dest_path, wanted_ids):
     return {"wanted_ids":len(wanted),"rows":rows}
 
 def main(argv=None):
-    ap=argparse.ArgumentParser(description="Aste Easy experimental daily v4 preview; zero DB writes")
+    ap=argparse.ArgumentParser(description="Aste Easy experimental daily v4; preview by default, guarded apply optional")
+    ap.add_argument("--apply",action="store_true")
+    ap.add_argument("--expected-new",type=int)
+    ap.add_argument("--expected-raw-sha256")
     ap.add_argument("--page-size",type=int,default=200)
     ap.add_argument("--safety-days",type=int,default=2)
     args=ap.parse_args(argv)
@@ -97,7 +160,7 @@ def main(argv=None):
     if not eligible_ids:
         summary={
             "version":VERSION,
-            "mode":"PREVIEW_ZERO_DB_WRITES",
+            "mode":"APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
             "created_at":datetime.now().astimezone().isoformat(),
             "build_summary":build_summary,
             "raw_window_rows":preplan.get("incoming_unique"),
@@ -108,7 +171,7 @@ def main(argv=None):
             "google_calls":0,
             "timings_seconds":{**timings,"total":round(time.perf_counter()-total,3)},
         }
-        out=Path(REPORTS_DIR)/"experimental_daily_v4_preview.json"
+        out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if args.apply else "experimental_daily_v4_preview.json")
         out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\\n",encoding="utf-8")
         print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
         print("[OUT]",out,flush=True)
@@ -145,7 +208,25 @@ def main(argv=None):
     plan["locations"]=sum(len(r[3]) for r in rebuilt_records)
     plan["location_plan_sources"]={"EXPERIMENTAL_PREVIEW":len(rebuilt_records)}
     timings["attach_locations"]=round(0.0,3)
-    importer_summary=importer_v2.run(apply=False,prebuilt_plan=plan)
+    if args.apply:
+        if args.expected_new is None or not args.expected_raw_sha256:
+            raise RuntimeError("--apply requires --expected-new and --expected-raw-sha256 from the latest preview")
+        if args.expected_new != len(plan["records"]) or args.expected_raw_sha256 != plan["raw_sha256"]:
+            raise RuntimeError(
+                "APPLY AUTHORIZATION MISMATCH: current plan differs from preview; zero writes. "
+                "Run preview again and use its eligible_new + raw_sha256."
+            )
+    importer_summary=importer_v2.run(
+        apply=args.apply,
+        expected_new=args.expected_new if args.apply else None,
+        expected_sha=args.expected_raw_sha256 if args.apply else None,
+        prebuilt_plan=plan,
+    )
+    post_verify=None
+    if args.apply:
+        t=time.perf_counter()
+        post_verify=_verify_imported_locations(plan)
+        timings["post_import_verify"]=round(time.perf_counter()-t,3)
     timings["total"]=round(time.perf_counter()-total,3)
 
     location_stats=_read_json(Path(REPORTS_DIR)/"experimental_listing_locations_preview_v1_stats.json")
@@ -171,7 +252,10 @@ def main(argv=None):
         "new_locations":importer_summary.get("new_locations"),
         "location_plan_sources":importer_summary.get("location_plan_sources"),
         "raw_sha256":importer_summary.get("raw_sha256"),
-        "db_writes":0,
+        "db_writes":importer_summary.get("inserted",0) if args.apply else 0,
+        "inserted":importer_summary.get("inserted",0),
+        "skipped_concurrent":importer_summary.get("skipped_concurrent",0),
+        "post_import_verify":post_verify,
         "google_calls":0,
         "timings_seconds":timings,
     }
