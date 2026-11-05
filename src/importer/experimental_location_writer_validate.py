@@ -20,17 +20,40 @@ from project_env import load_project_env
 
 VALIDATE_RPC = "aste_validate_replace_listing_locations_v1"
 
-def choose_pid(locations_by_id, explicit=None):
+def fetch_existing_pvp_ids(base,key):
+    out=set()
+    offset=0
+    while True:
+        url=base.rstrip("/")+"/rest/v1/listings?select=pvp_id&order=pvp_id.asc&limit=1000&offset="+str(offset)
+        req=Request(url,method="GET",headers={
+            "apikey":key,
+            "Authorization":"Bearer "+key,
+            "Accept":"application/json",
+        })
+        with urlopen(req,timeout=120) as response:
+            rows=json.loads(response.read().decode("utf-8") or "[]")
+        for row in rows:
+            pid=str(row.get("pvp_id") or "")
+            if pid:
+                out.add(pid)
+        if len(rows)<1000:
+            break
+        offset += len(rows)
+    return out
+
+def choose_pid(locations_by_id, existing_pvp_ids, explicit=None):
     if explicit:
         if explicit not in locations_by_id:
             raise RuntimeError("Requested pvp_id has no location preview: " + explicit)
+        if explicit not in existing_pvp_ids:
+            raise RuntimeError("Requested pvp_id is no longer present in listings: " + explicit)
         return explicit
     candidates = sorted(
-        locations_by_id,
+        (pid for pid in locations_by_id if pid in existing_pvp_ids),
         key=lambda pid: (len(locations_by_id[pid]) <= 1, pid)
     )
     if not candidates:
-        raise RuntimeError("No location preview rows available")
+        raise RuntimeError("No current DB listing has location preview rows")
     return candidates[0]
 
 def rpc_validate(base,key,pvp_id,locations):
@@ -62,7 +85,8 @@ def main(argv=None):
     key=os.environ["SUPABASE_SERVICE_ROLE"]
 
     locations_by_id=importer.load_location_preview()
-    pid=choose_pid(locations_by_id,args.pvp_id)
+    existing_pvp_ids=fetch_existing_pvp_ids(base,key)
+    pid=choose_pid(locations_by_id,existing_pvp_ids,args.pvp_id)
     locations=locations_by_id[pid]
 
     result=rpc_validate(base,key,pid,locations)
