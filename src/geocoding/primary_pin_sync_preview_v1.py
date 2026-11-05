@@ -9,6 +9,10 @@ import os
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
+import socket
+import ssl
+import time
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
@@ -24,11 +28,23 @@ PAGE = 1000
 
 def _get(base,key,path,params):
     url=base.rstrip("/")+"/rest/v1/"+path+"?"+urlencode(params)
-    req=Request(url,method="GET",headers={
-        "apikey":key,"Authorization":"Bearer "+key,"Accept":"application/json"
-    })
-    with urlopen(req,timeout=120) as r:
-        return json.loads(r.read().decode("utf-8") or "[]")
+    max_attempts=5
+    for attempt in range(max_attempts):
+        req=Request(url,method="GET",headers={
+            "apikey":key,"Authorization":"Bearer "+key,"Accept":"application/json"
+        })
+        try:
+            with urlopen(req,timeout=120) as r:
+                return json.loads(r.read().decode("utf-8") or "[]")
+        except HTTPError:
+            raise
+        except (URLError, ConnectionResetError, TimeoutError, socket.timeout, ssl.SSLError, OSError) as exc:
+            if attempt >= max_attempts-1:
+                raise
+            wait=1.5*(attempt+1)
+            print(f"[RETRY] GET {path} transport error {type(exc).__name__}; retry {attempt+2}/{max_attempts}", flush=True)
+            time.sleep(wait)
+    raise RuntimeError("GET retry loop exhausted")
 
 def _all(base,key,path,select,order,extra=None):
     out=[]
