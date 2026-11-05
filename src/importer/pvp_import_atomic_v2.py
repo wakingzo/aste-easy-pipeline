@@ -134,8 +134,10 @@ def prepare_children(pvp_id, subjects, attachments):
 
 
 def load_location_preview(path=LOCATION_PREVIEW):
+    # Optional enrichment: the daily importer must not depend on a stale/offline
+    # experimental report in order to create the mandatory child location row.
     if not path.is_file():
-        raise RuntimeError("Location preview missing: " + str(path))
+        return defaultdict(list)
     out = defaultdict(list)
     seen = set()
     with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -168,6 +170,63 @@ def load_location_preview(path=LOCATION_PREVIEW):
         if sum(1 for r in rows if r["is_primary"]) != 1:
             raise ValueError("Location preview: expected exactly one primary for " + pid)
     return out
+
+def fallback_primary_location(preview_row):
+    """Create the minimum primary child row directly from the new listing payload.
+
+    This is deliberately conservative and self-contained: it guarantees that every
+    newly inserted listing has a listing_locations child even when the experimental
+    resolver report has not yet been regenerated for today's RAW. Later resolver
+    passes may enrich/replace this evidence.
+    """
+    pid = str(preview_row["pvp_id"])
+    lat = preview_row.get("latitudine")
+    lon = preview_row.get("longitudine")
+    try:
+        lat_f = float(lat) if lat not in (None, "") else None
+        lon_f = float(lon) if lon not in (None, "") else None
+    except (TypeError, ValueError):
+        lat_f = lon_f = None
+    valid = (
+        lat_f is not None and lon_f is not None
+        and -90 <= lat_f <= 90 and -180 <= lon_f <= 180
+        and not (lat_f == 0 and lon_f == 0)
+    )
+    if not valid:
+        lat_f = lon_f = None
+    return [{
+        "pvp_id": pid,
+        "bene_index": 0,
+        "is_primary": True,
+        "address_raw": preview_row.get("indirizzo") or None,
+        "comune_pvp": preview_row.get("comune") or None,
+        "provincia_pvp": preview_row.get("provincia") or None,
+        "sigla_provincia_pvp": preview_row.get("sigla_provincia") or None,
+        "cap_pvp": preview_row.get("cap") or None,
+        "codice_istat": None,
+        "pvp_latitudine": lat_f,
+        "pvp_longitudine": lon_f,
+        "street": None,
+        "civic": None,
+        "internal": None,
+        "locality": None,
+        "snc": False,
+        "is_intersection": False,
+        "latitudine": lat_f,
+        "longitudine": lon_f,
+        "source": "PVP" if valid else None,
+        "precision": "PVP_COORD" if valid else "NESSUNA",
+        "confidence": "MEDIUM" if valid else None,
+        "status": "RESOLVED" if valid else "PENDING",
+        "formatted_address": None,
+        "anncsu_status": None,
+        "google_status": None,
+        "warnings": ["DAILY_FALLBACK_PRIMARY"],
+        "resolution_reason": "Daily atomic import fallback; resolver enrichment pending.",
+        "resolver_version": "daily_import_fallback_v1",
+        "checked_at": None,
+    }]
+
 
 def _load_raw_unique_with_sha(path):
     """Load RAW once, preserving legacy duplicate validation and exact file SHA."""
@@ -381,12 +440,16 @@ def build_plan():
     location_by_id = load_location_preview()
 
     records = []
+    location_plan_sources = Counter()
     for row in fast["eligible"]:
         pid = str(row["pvp_id"])
         ss, aa = prepare_children(pid, sub_by_id[pid], att_by_id[pid])
         locations = location_by_id.get(pid) or []
-        if not locations:
-            raise RuntimeError("Eligible listing has no listing_locations preview rows: " + pid)
+        if locations:
+            location_plan_sources["EXPERIMENTAL_PREVIEW"] += 1
+        else:
+            locations = fallback_primary_location(row)
+            location_plan_sources["DAILY_FALLBACK_PRIMARY"] += 1
         records.append((prepare_listing(row, raw_by_id[pid]), ss, aa, locations))
 
     return {
@@ -400,6 +463,7 @@ def build_plan():
         "subjects": sum(len(r[1]) for r in records),
         "attachments": sum(len(r[2]) for r in records),
         "locations": sum(len(r[3]) for r in records),
+        "location_plan_sources": dict(location_plan_sources),
         "planner_stats": {
             "version": "delta_plan_v1_1",
             "db_listing_ids_total": len(db_ids),
@@ -523,6 +587,7 @@ def run(*, apply=False, expected_new=None, expected_sha=None, preview_geo=None, 
                "new_candidates": plan["new_candidates"], "eligible_new": len(records),
                "new_soggetti": plan["subjects"], "new_allegati": plan["attachments"],
                "new_locations": plan["locations"],
+               "location_plan_sources": plan.get("location_plan_sources", {}),
                "eligible_with_pvp_coords": sum(r[0].get("pvp_latitudine") is not None for r in records),
                "eligible_without_pvp_coords": sum(r[0].get("pvp_latitudine") is None for r in records),
                "decision_counts": plan["decisions"], "primary_address_sources": plan["primary_sources"],
