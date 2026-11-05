@@ -17,6 +17,7 @@ for _p in (SRC, HERE, SRC / "pipeline", SRC / "geocoding"):
 
 import pvp_import_atomic_v2 as importer
 from project_env import load_project_env
+from aste_paths import REPORTS_DIR, ensure_runtime_dirs
 
 VALIDATE_RPC = "aste_validate_replace_listing_locations_v1"
 
@@ -80,6 +81,7 @@ def main(argv=None):
     ap.add_argument("--pvp-id")
     args=ap.parse_args(argv)
 
+    ensure_runtime_dirs()
     load_project_env(required=("SUPABASE_URL","SUPABASE_SERVICE_ROLE"))
     base=os.environ["SUPABASE_URL"].rstrip("/")
     key=os.environ["SUPABASE_SERVICE_ROLE"]
@@ -109,7 +111,10 @@ def main(argv=None):
         "primary_locations":sum(bool(x.get("is_primary")) for x in locations),
         "rpc_result":rpc_result,
     }
+    out=REPORTS_DIR/"experimental_location_writer_validate.json"
+    out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2))
+    print("[OUT]",out)
     return 0
 
 if __name__=="__main__":
