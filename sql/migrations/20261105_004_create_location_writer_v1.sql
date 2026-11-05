@@ -152,7 +152,7 @@ create or replace function public.aste_validate_replace_listing_locations_v1(
 language plpgsql
 security definer
 set search_path = public
-as $
+as $validator$
 declare
     v_result jsonb;
 begin
@@ -171,7 +171,7 @@ begin
         'rpc_result', v_result
     );
 end;
-$;
+$validator$;
 
 revoke all on function public.aste_validate_replace_listing_locations_v1(text,jsonb) from public;
 revoke all on function public.aste_validate_replace_listing_locations_v1(text,jsonb) from anon;
