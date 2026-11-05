@@ -10,6 +10,7 @@ from collections import Counter
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent
@@ -42,8 +43,12 @@ def _post(base,key,path,rows,on_conflict=None):
         "Content-Type":"application/json","Accept":"application/json",
         "Prefer":"resolution=ignore-duplicates,return=minimal"
     })
-    with urlopen(req,timeout=120) as r:
-        r.read()
+    try:
+        with urlopen(req,timeout=120) as r:
+            r.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Supabase POST {path} failed HTTP {exc.code}: {detail[:1200]}") from exc
 
 def load_preview(path):
     h=hashlib.sha256()
@@ -106,7 +111,10 @@ def normalize_for_db(x,listing_id):
         "anncsu_status","google_status","warnings","resolution_reason","resolver_version",
         "checked_at"
     }
-    row={k:v for k,v in x.items() if k in allowed and v is not None}
+    # PostgREST bulk inserts require every JSON object in the array to expose
+    # the same set of keys. Keep nullable columns explicitly present as null;
+    # otherwise rows with different optional fields produce HTTP 400.
+    row={k:x.get(k) for k in sorted(allowed)}
     row["listing_id"]=listing_id
     row["pvp_id"]=str(x["pvp_id"])
     row["bene_index"]=int(x["bene_index"])
