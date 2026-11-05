@@ -50,7 +50,7 @@ def _write_delta_raw(source_path, dest_path, wanted_ids):
             obj=json.loads(line)
             pid=str(obj.get("pvp_id") or "")
             if pid in wanted:
-                out.write(json.dumps(obj,ensure_ascii=False)+"\\n")
+                out.write(json.dumps(obj,ensure_ascii=False)+"\n")
                 found.add(pid)
                 rows += 1
     if found != wanted:
