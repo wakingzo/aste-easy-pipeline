@@ -130,11 +130,21 @@ def main(argv=None):
         SRC/"importer"/"experimental_listing_locations_preview_v1.py",RESOLVER,UNIFIED
     ])
 
-    # Crucial: build_plan now sees the freshly generated location preview, so any
-    # eligible new listing is planned with rich location children atomically.
-    t=time.perf_counter()
-    plan=importer_v2.build_plan()
-    timings["import_plan"]=round(time.perf_counter()-t,3)
+    # Reuse the already authorized preplan and only replace its location payload
+    # with the freshly materialized resolver output. This avoids a second full DB scan.
+    location_by_id=importer_v2.load_location_preview()
+    rebuilt_records=[]
+    for listing,subjects,attachments,_old_locations in preplan["records"]:
+        pid=str(listing["pvp_id"])
+        locations=location_by_id.get(pid) or []
+        if not locations:
+            raise RuntimeError("Fresh resolver output missing locations for planned pvp_id="+pid)
+        rebuilt_records.append((listing,subjects,attachments,locations))
+    plan=dict(preplan)
+    plan["records"]=rebuilt_records
+    plan["locations"]=sum(len(r[3]) for r in rebuilt_records)
+    plan["location_plan_sources"]={"EXPERIMENTAL_PREVIEW":len(rebuilt_records)}
+    timings["attach_locations"]=round(0.0,3)
     importer_summary=importer_v2.run(apply=False,prebuilt_plan=plan)
     timings["total"]=round(time.perf_counter()-total,3)
 
