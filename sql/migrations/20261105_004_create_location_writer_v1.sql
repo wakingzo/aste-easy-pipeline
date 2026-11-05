@@ -144,4 +144,38 @@ revoke all on function public.aste_replace_listing_locations_v1(text,jsonb) from
 revoke all on function public.aste_replace_listing_locations_v1(text,jsonb) from authenticated;
 grant execute on function public.aste_replace_listing_locations_v1(text,jsonb) to service_role;
 
+
+create or replace function public.aste_validate_replace_listing_locations_v1(
+    p_pvp_id text,
+    p_locations jsonb
+) returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $
+declare
+    v_result jsonb;
+begin
+    begin
+        v_result := public.aste_replace_listing_locations_v1(p_pvp_id, p_locations);
+        raise exception using errcode='P0001', message='ASTE_EASY_VALIDATION_ROLLBACK';
+    exception
+        when sqlstate 'P0001' then
+            if sqlerrm <> 'ASTE_EASY_VALIDATION_ROLLBACK' then
+                raise;
+            end if;
+    end;
+    return jsonb_build_object(
+        'validated', true,
+        'rolled_back', true,
+        'rpc_result', v_result
+    );
+end;
+$;
+
+revoke all on function public.aste_validate_replace_listing_locations_v1(text,jsonb) from public;
+revoke all on function public.aste_validate_replace_listing_locations_v1(text,jsonb) from anon;
+revoke all on function public.aste_validate_replace_listing_locations_v1(text,jsonb) from authenticated;
+grant execute on function public.aste_validate_replace_listing_locations_v1(text,jsonb) to service_role;
+
 commit;
