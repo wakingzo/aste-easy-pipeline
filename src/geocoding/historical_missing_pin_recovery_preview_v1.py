@@ -127,7 +127,8 @@ def resolve_code(row,index):
     return None,"AMBIGUOUS_COMUNE",cands
 
 def municipality_pin(code,comune,ann_con,istat_con,cache):
-    if code in cache: return cache[code]
+    cache_key=code+"|"+norm(comune)
+    if cache_key in cache: return cache[cache_key]
     row=ann_con.execute(
         "select min_lat,max_lat,min_lon,max_lon from municipality_bbox where codice_istat=?",(code,)
     ).fetchone()
@@ -136,15 +137,36 @@ def municipality_pin(code,comune,ann_con,istat_con,cache):
              "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
              "source":"anncsu_comune_indicativo"}
         if valid_pair(rep["lat"],rep["lon"]):
-            cache[code]=rep; return rep
+            cache[cache_key]=rep; return rep
 
     rows=list(istat_con.execute(
-        "select nome,lat,lon from localities where pro_com=? and nome_norm=?",(code,norm(comune))
+        "select pro_com,nome,lat,lon from localities where pro_com=? and nome_norm=?",(code,norm(comune))
     ))
     if len(rows)==1 and valid_pair(rows[0]["lat"],rows[0]["lon"]):
-        rep={"lat":float(rows[0]["lat"]),"lon":float(rows[0]["lon"]),"source":"istat_comune_indicativo"}
-        cache[code]=rep; return rep
-    cache[code]=None
+        rep={"lat":float(rows[0]["lat"]),"lon":float(rows[0]["lon"]),"source":"istat_comune_indicativo",
+             "matched_pro_com":str(rows[0]["pro_com"]),"match_mode":"SAME_CODE_EXACT_NAME"}
+        cache[cache_key]=rep; return rep
+
+    # Compatibility fallback for municipality-code/version changes (not fuzzy).
+    # Accept an exact locality/municipality name only when it belongs to one
+    # distinct ISTAT 2021 municipality code nationwide.
+    global_rows=list(istat_con.execute(
+        "select pro_com,nome,lat,lon from localities where nome_norm=?",(norm(comune),)
+    ))
+    by_code={}
+    for r in global_rows:
+        if valid_pair(r["lat"],r["lon"]):
+            by_code.setdefault(str(r["pro_com"]),[]).append(r)
+    if len(by_code)==1:
+        old_code,next_rows=next(iter(by_code.items()))
+        if len(next_rows)==1:
+            r=next_rows[0]
+            rep={"lat":float(r["lat"]),"lon":float(r["lon"]),
+                 "source":"istat_nome_univoco_indicativo",
+                 "matched_pro_com":old_code,"match_mode":"GLOBAL_EXACT_NAME_UNIQUE_CODE"}
+            cache[cache_key]=rep; return rep
+
+    cache[cache_key]=None
     return None
 
 def main(argv=None):
@@ -211,7 +233,9 @@ def main(argv=None):
                       "regione":r.get("regione"),"latitudine":pin["lat"],"longitudine":pin["lon"],
                       "maps_link":maps_link(pin["lat"],pin["lon"]),"source":pin["source"],
                       "precision":"COMUNE" if action=="PUBLISH_COMUNE_FALLBACK" else (loc or {}).get("precision"),
-                      "code_resolution":code_reason})
+                      "code_resolution":code_reason,
+                      "matched_pro_com":pin.get("matched_pro_com"),
+                      "match_mode":pin.get("match_mode")})
 
     ann_con.close(); istat_con.close()
 
