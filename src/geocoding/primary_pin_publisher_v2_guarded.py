@@ -168,7 +168,7 @@ def build_plan(base,key):
         ann.close(); istat.close()
 
     plan.sort(key=lambda x:int(x["pvp_id"]))
-    return plan,dict(actions),dict(sources),dict(precisions)
+    return plan,dict(actions),dict(sources),dict(precisions),dict(boundary_counts)
 
 def sha_plan(plan):
     raw=json.dumps(plan,ensure_ascii=False,sort_keys=True,separators=(",",":"))
@@ -195,7 +195,7 @@ def main(argv=None):
     base=os.environ["SUPABASE_URL"].rstrip("/")
     key=os.environ["SUPABASE_SERVICE_ROLE"]
 
-    plan,actions,sources,precisions=build_plan(base,key)
+    plan,actions,sources,precisions,boundary_counts=build_plan(base,key)
     sha=sha_plan(plan)
     summary={
         "version":VERSION,
