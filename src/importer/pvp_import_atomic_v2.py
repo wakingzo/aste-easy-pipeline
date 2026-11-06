@@ -592,7 +592,7 @@ def run(*, apply=False, expected_new=None, expected_sha=None, preview_geo=None, 
                "eligible_without_pvp_coords": sum(r[0].get("pvp_latitudine") is None for r in records),
                "decision_counts": plan["decisions"], "primary_address_sources": plan["primary_sources"],
                "raw_sha256": plan["raw_sha256"], "google_calls": 0,
-               "inserted": 0, "skipped_concurrent": 0, "existing_writes": 0,
+               "inserted": 0, "inserted_pvp_ids": [], "skipped_concurrent": 0, "existing_writes": 0,
                "rpc_network_retries": 0, "rpc_recovered_after_transport": 0,
                "planner_stats": plan.get("planner_stats", {})}
     if not apply and preview_geo is not None:
@@ -613,6 +613,7 @@ def run(*, apply=False, expected_new=None, expected_sha=None, preview_geo=None, 
                 summary["rpc_recovered_after_transport"] += int(bool(result.get("recovered_after_transport")))
                 if result["inserted"]:
                     summary["inserted"] += 1
+                    summary["inserted_pvp_ids"].append(str(row["pvp_id"]))
                 else:
                     summary["skipped_concurrent"] += 1
                 step = 25 if total <= 500 else 100
