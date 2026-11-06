@@ -7,6 +7,8 @@ import math
 import os
 import sys
 import sqlite3
+import re
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +21,7 @@ for p in (SRC,HERE,SRC/"importer",SRC/"pipeline"):
     if str(p) not in sys.path:
         sys.path.insert(0,str(p))
 
-from aste_paths import REPORTS_DIR, ANNCSU_DIR, ensure_runtime_dirs
+from aste_paths import REPORTS_DIR, ANNCSU_DIR, ROOT_DIR, ensure_runtime_dirs
 from project_env import load_project_env
 
 VERSION="primary_pin_publisher_v2_preview"
@@ -63,6 +65,12 @@ def valid_pair(lat,lon):
 def maps_link(lat,lon):
     return "https://www.google.com/maps?q="+quote(f"{float(lat):.8f},{float(lon):.8f}")
 
+def norm_name(v):
+    s="" if v is None else str(v).strip().replace("’","'").replace("`","'")
+    s=unicodedata.normalize("NFKD",s)
+    s="".join(ch for ch in s if not unicodedata.combining(ch)).casefold()
+    return re.sub(r"\s+"," ",re.sub(r"[^a-z0-9]+"," ",s)).strip()
+
 def open_anncsu_bbox():
     path=Path(os.environ.get("ANNCSU_SQLITE_INDEX","") or (ANNCSU_DIR/"anncsu_runtime.sqlite3")).resolve()
     if not path.is_file():
@@ -72,7 +80,17 @@ def open_anncsu_bbox():
     con.row_factory=sqlite3.Row
     return con
 
-def municipality_fallback(loc,con,cache):
+def open_istat_localities():
+    default_path=ROOT_DIR/"data"/"istat"/"istat_localita_2021.sqlite3"
+    path=Path(os.environ.get("ISTAT_LOCALITY_INDEX","") or default_path).resolve()
+    if not path.is_file():
+        raise RuntimeError("ISTAT locality SQLite index missing: "+str(path))
+    uri="file:"+str(path).replace("\\","/")+"?mode=ro"
+    con=sqlite3.connect(uri,uri=True)
+    con.row_factory=sqlite3.Row
+    return con
+
+def municipality_fallback(loc,ann_con,istat_con,cache):
     # Only physical-bene geography from listing_locations is allowed here.
     comune=str(loc.get("comune_pvp") or "").strip()
     code="".join(ch for ch in str(loc.get("codice_istat") or "") if ch.isdigit())
@@ -82,7 +100,7 @@ def municipality_fallback(loc,con,cache):
     if not code:
         return None, "MISSING_CODICE_ISTAT"
     if code not in cache:
-        row=con.execute(
+        row=ann_con.execute(
             "select min_lat,max_lat,min_lon,max_lon,count from municipality_bbox where codice_istat=?",
             (code,)
         ).fetchone()
@@ -90,27 +108,45 @@ def municipality_fallback(loc,con,cache):
             cache[code]={
                 "lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
                 "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
-                "count":int(row["count"]),
+                "source":"anncsu_comune_indicativo",
+                "reason":"Punto indicativo del Comune del bene fisico PVP, derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
             }
         else:
-            cache[code]=None
+            target=norm_name(comune)
+            rows=list(istat_con.execute(
+                "select nome,lat,lon from localities where pro_com=? and nome_norm=?",
+                (code,target)
+            ))
+            if len(rows)==1 and valid_pair(rows[0]["lat"],rows[0]["lon"]):
+                cache[code]={
+                    "lat":float(rows[0]["lat"]),
+                    "lon":float(rows[0]["lon"]),
+                    "source":"istat_comune_indicativo",
+                    "reason":"Punto indicativo del Comune del bene fisico PVP, ricavato dalla località puntuale ISTAT omonima nello stesso codice comunale; non rappresenta la posizione esatta dell'immobile.",
+                }
+            elif len(rows)>1:
+                cache[code]={"error":"ISTAT_COMUNE_EXACT_AMBIGUOUS"}
+            else:
+                cache[code]={"error":"ISTAT_COMUNE_EXACT_NOT_FOUND"}
     rep=cache.get(code)
     if not rep:
-        return None, "ANNCSU_BBOX_NOT_FOUND"
+        return None, "COMUNE_FALLBACK_NOT_FOUND"
+    if rep.get("error"):
+        return None, rep["error"]
     if not valid_pair(rep.get("lat"),rep.get("lon")):
-        return None, "ANNCSU_BBOX_INVALID_COORDS"
+        return None, "COMUNE_FALLBACK_INVALID_COORDS"
     return {
         "lat":float(rep["lat"]),
         "lon":float(rep["lon"]),
-        "source":"anncsu_comune_indicativo",
+        "source":rep["source"],
         "precision":"COMUNE",
         "status":"DONE",
-        "reason":"Punto indicativo del Comune del bene fisico PVP, derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
+        "reason":rep["reason"],
         "formatted_address":"Comune di "+comune,
         "fallback_from_status":str(loc.get("status") or "UNKNOWN"),
     }, None
 
-def choose_pin(loc,con,cache):
+def choose_pin(loc,ann_con,istat_con,cache):
     status=str(loc.get("status") or "").upper()
     if status=="RESOLVED" and valid_pair(loc.get("latitudine"),loc.get("longitudine")):
         return {
@@ -125,7 +161,7 @@ def choose_pin(loc,con,cache):
         }, None
     # REVIEW / UNRESOLVED / NEEDS_COORD / PENDING are deliberately not trusted
     # as exact points. Preserve map coverage with an explicit municipality marker.
-    return municipality_fallback(loc,con,cache)
+    return municipality_fallback(loc,ann_con,istat_con,cache)
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Preview publication of primary map pins for newly imported PENDING listings")
@@ -168,6 +204,7 @@ def main(argv=None):
         raise RuntimeError("PENDING listing(s) without exactly one primary location; first="+str(missing[:10]))
 
     ann_con=open_anncsu_bbox()
+    istat_con=open_istat_localities()
     rep_cache={}
     plans=[]
     counts=Counter()
@@ -178,7 +215,7 @@ def main(argv=None):
     for listing in listings:
         pid=str(listing["pvp_id"])
         loc=by_pid[pid]
-        pin,no_pin_reason=choose_pin(loc,ann_con,rep_cache)
+        pin,no_pin_reason=choose_pin(loc,ann_con,istat_con,rep_cache)
         if pin is None:
             counts["NO_SAFE_PIN"]+=1
             case={
@@ -219,6 +256,7 @@ def main(argv=None):
         })
 
     ann_con.close()
+    istat_con.close()
 
     summary={
         "version":VERSION,
