@@ -849,6 +849,12 @@ CURRENT_COMUNE_ALIASES = {
     "vighizzolo d este": "borgo veneto",
     "gambugliano": "sovizzo",
     "piadena": "piadena drizzona",
+    "castegnero": "castegnero nanto",
+    "mosso": "valdilana",
+    "murisengo": "murisengo monferrato",
+    "cadrezzate": "cadrezzate con osmate",
+    "moransengo": "moransengo tonengo",
+    "monteciccardo": "pesaro",
 }
 
 
