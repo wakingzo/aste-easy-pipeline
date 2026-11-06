@@ -62,13 +62,32 @@ def _all(base,key,path,params):
 def _patch(base,key,pvp_id,payload):
     url=base.rstrip("/")+"/rest/v1/listings?"+urlencode({"pvp_id":"eq."+str(pvp_id)})
     data=json.dumps(payload,ensure_ascii=False).encode("utf-8")
-    req=Request(url,data=data,method="PATCH",headers={
-        "apikey":key,"Authorization":"Bearer "+key,
-        "Content-Type":"application/json","Accept":"application/json",
-        "Prefer":"return=representation"
+    max_attempts=4
+    for attempt in range(max_attempts):
+        req=Request(url,data=data,method="PATCH",headers={
+            "apikey":key,"Authorization":"Bearer "+key,
+            "Content-Type":"application/json","Accept":"application/json",
+            "Prefer":"return=representation"
+        })
+        try:
+            with urlopen(req,timeout=120) as r:
+                return json.loads(r.read().decode("utf-8") or "[]")
+        except Exception as exc:
+            if not _is_transient_transport(exc) or attempt>=max_attempts-1:
+                raise
+            print(f"[PATCH RETRY] pvp_id={pvp_id} transient {type(exc).__name__}; retry {attempt+2}/{max_attempts}",flush=True)
+            time.sleep(1.5*(attempt+1))
+    raise RuntimeError("PATCH retry loop exhausted")
+
+def _fetch_one_listing(base,key,pvp_id):
+    rows=_get(base,key,"listings",{
+        "select":"listing_id,pvp_id,comune,provincia,sigla_provincia,regione",
+        "pvp_id":"eq."+str(pvp_id),
+        "limit":"2",
     })
-    with urlopen(req,timeout=120) as r:
-        return json.loads(r.read().decode("utf-8") or "[]")
+    if not isinstance(rows,list) or len(rows)!=1:
+        raise RuntimeError("Expected exactly one listing for pvp_id="+str(pvp_id))
+    return rows[0]
 
 def canonical_plan(rows,istat):
     plan=[]
@@ -163,9 +182,25 @@ def main(argv=None):
 
     writes=0
     for item in plan:
+        current=_fetch_one_listing(base,key,item["pvp_id"])
+        for field,expected in item["before"].items():
+            if previous.clean(current.get(field))!=previous.clean(expected):
+                raise RuntimeError(
+                    f"Refusing row apply: pvp_id={item['pvp_id']} field={field} "
+                    f"current={current.get(field)!r} expected_before={expected!r}"
+                )
+
         got=_patch(base,key,item["pvp_id"],item["changes"])
         if not isinstance(got,list) or len(got)!=1:
             raise RuntimeError("Unexpected PATCH result for pvp_id="+item["pvp_id"])
+
+        patched=got[0]
+        for field,expected in item["after"].items():
+            if previous.clean(patched.get(field))!=previous.clean(expected):
+                raise RuntimeError(
+                    f"PATCH readback mismatch: pvp_id={item['pvp_id']} field={field} "
+                    f"got={patched.get(field)!r} expected={expected!r}"
+                )
         writes+=1
 
     # Full read-back and exact no-drift verification.
