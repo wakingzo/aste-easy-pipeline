@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -100,11 +101,22 @@ def main(argv=None):
     plan,unresolved=canonical_plan(rows,istat)
     sha=plan_sha(plan)
 
+    field_counts=Counter()
+    signature_counts=Counter()
+    for item in plan:
+        fields=tuple(sorted(item["changes"].keys()))
+        signature_counts["+".join(fields)]+=1
+        for field in fields:
+            field_counts[field]+=1
+
     summary={
         "version":VERSION,
         "mode":"APPLY" if args.apply else "PREVIEW_ZERO_DB_WRITES",
         "db_listings":len(rows),
         "planned_updates":len(plan),
+        "change_counts_by_field":dict(field_counts),
+        "change_signature_counts":dict(signature_counts),
+        "only_comune_updates":sum(1 for x in plan if set(x["changes"])=={"comune"}),
         "unresolved":unresolved,
         "plan_sha256":sha,
         "google_calls":0,
