@@ -6,6 +6,7 @@ import json
 import math
 import os
 import sys
+import sqlite3
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,9 +19,8 @@ for p in (SRC,HERE,SRC/"importer",SRC/"pipeline"):
     if str(p) not in sys.path:
         sys.path.insert(0,str(p))
 
-from aste_paths import REPORTS_DIR, ensure_runtime_dirs
+from aste_paths import REPORTS_DIR, ANNCSU_DIR, ensure_runtime_dirs
 from project_env import load_project_env
-import geocode_pending_v2 as legacy_geo
 
 VERSION="primary_pin_publisher_v2_preview"
 PAGE=500
@@ -63,42 +63,50 @@ def valid_pair(lat,lon):
 def maps_link(lat,lon):
     return "https://www.google.com/maps?q="+quote(f"{float(lat):.8f},{float(lon):.8f}")
 
-def municipality_fallback(loc,ctx,cache):
+def open_anncsu_bbox():
+    path=Path(os.environ.get("ANNCSU_SQLITE_INDEX","") or (ANNCSU_DIR/"anncsu_runtime.sqlite3")).resolve()
+    if not path.is_file():
+        raise RuntimeError("ANNCSU SQLite index missing: "+str(path))
+    uri="file:"+str(path).replace("\\","/")+"?mode=ro"
+    con=sqlite3.connect(uri,uri=True)
+    con.row_factory=sqlite3.Row
+    return con
+
+def municipality_fallback(loc,con,cache):
     # Only physical-bene geography from listing_locations is allowed here.
     comune=str(loc.get("comune_pvp") or "").strip()
-    if not comune:
+    code="".join(ch for ch in str(loc.get("codice_istat") or "") if ch.isdigit())
+    code=code.zfill(6)[-6:] if code else ""
+    if not comune or not code:
         return None
-    sample={
-        "comune":comune,
-        "provincia":str(loc.get("provincia_pvp") or "").strip(),
-        "sigla_provincia":str(loc.get("sigla_provincia_pvp") or "").strip(),
-        "cap":str(loc.get("cap_pvp") or "").strip(),
-        "indirizzo":str(loc.get("address_raw") or "").strip(),
-    }
-    meta=ctx.resolve_admin(sample)
-    if meta.get("status")!="RESOLVED" or not meta.get("canonical_code"):
-        return None
-    code=str(meta["canonical_code"])
     if code not in cache:
-        cache[code]=ctx.representative_point(sample,admin_meta=meta)
-    rep=cache[code]
-    if not rep.get("ok") or not valid_pair(rep.get("lat"),rep.get("lon")):
-        return None
-    pos=ctx.test(sample,lat=rep["lat"],lon=rep["lon"],admin_meta=meta).get("position")
-    if pos!="INSIDE":
+        row=con.execute(
+            "select min_lat,max_lat,min_lon,max_lon,count from municipality_bbox where codice_istat=?",
+            (code,)
+        ).fetchone()
+        if row:
+            cache[code]={
+                "lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
+                "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
+                "count":int(row["count"]),
+            }
+        else:
+            cache[code]=None
+    rep=cache.get(code)
+    if not rep or not valid_pair(rep.get("lat"),rep.get("lon")):
         return None
     return {
         "lat":float(rep["lat"]),
         "lon":float(rep["lon"]),
-        "source":"istat_comune_indicativo",
+        "source":"anncsu_comune_indicativo",
         "precision":"COMUNE",
         "status":"DONE",
-        "reason":"Punto indicativo nel Comune del bene fisico PVP; non rappresenta la posizione esatta dell'immobile.",
+        "reason":"Punto indicativo del Comune del bene fisico PVP, derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
         "formatted_address":"Comune di "+comune,
         "fallback_from_status":str(loc.get("status") or "UNKNOWN"),
     }
 
-def choose_pin(loc,ctx,cache):
+def choose_pin(loc,con,cache):
     status=str(loc.get("status") or "").upper()
     if status=="RESOLVED" and valid_pair(loc.get("latitudine"),loc.get("longitudine")):
         return {
@@ -113,7 +121,7 @@ def choose_pin(loc,ctx,cache):
         }
     # REVIEW / UNRESOLVED / NEEDS_COORD / PENDING are deliberately not trusted
     # as exact points. Preserve map coverage with an explicit municipality marker.
-    return municipality_fallback(loc,ctx,cache)
+    return municipality_fallback(loc,con,cache)
 
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Preview publication of primary map pins for newly imported PENDING listings")
@@ -155,7 +163,7 @@ def main(argv=None):
         missing=sorted(pending_ids-set(by_pid))
         raise RuntimeError("PENDING listing(s) without exactly one primary location; first="+str(missing[:10]))
 
-    ctx,_,_=legacy_geo.prepare_context(no_anncsu=True)
+    ann_con=open_anncsu_bbox()
     rep_cache={}
     plans=[]
     counts=Counter()
@@ -165,7 +173,7 @@ def main(argv=None):
     for listing in listings:
         pid=str(listing["pvp_id"])
         loc=by_pid[pid]
-        pin=choose_pin(loc,ctx,rep_cache)
+        pin=choose_pin(loc,ann_con,rep_cache)
         if pin is None:
             counts["NO_SAFE_PIN"]+=1
             plans.append({
@@ -194,6 +202,8 @@ def main(argv=None):
             "geocode_formatted_address":pin["formatted_address"],
             "fallback_from_status":pin["fallback_from_status"],
         })
+
+    ann_con.close()
 
     summary={
         "version":VERSION,
