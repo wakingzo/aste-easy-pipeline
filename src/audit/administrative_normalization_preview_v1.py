@@ -25,6 +25,22 @@ from project_env import load_project_env
 VERSION="administrative_normalization_preview_v1"
 PAGE=1000
 
+# Exact historical/renamed municipality aliases documented by ISTAT.
+# No fuzzy matching: these are explicit administrative successions.
+HISTORICAL_COMUNE_ALIASES = {
+    "veruno": "Gattico-Veruno",
+    "castegnero": "Castegnero Nanto",
+    "tonengo": "Moransengo-Tonengo",
+    "mosso": "Valdilana",
+    "murisengo": "Murisengo Monferrato",
+    "cadrezzate": "Cadrezzate con Osmate",
+    "moransengo": "Moransengo-Tonengo",
+    "gambugliano": "Sovizzo",
+    "monteciccardo": "Pesaro",
+    "rossano": "Corigliano-Rossano",
+    "corigliano calabro": "Corigliano-Rossano",
+}
+
 def clean(v):
     return "" if v is None else re.sub(r"\s+"," ",str(v).replace("\u00a0"," ")).strip()
 
@@ -97,19 +113,30 @@ def load_index(path):
     return by_name
 
 def resolve(row,index):
-    cands=list(index.get(norm(row.get("comune")),[]))
+    original_norm=norm(row.get("comune"))
+    lookup_norm=original_norm
+    alias_target=HISTORICAL_COMUNE_ALIASES.get(original_norm)
+    if alias_target:
+        lookup_norm=norm(alias_target)
+
+    cands=list(index.get(lookup_norm,[]))
     if not cands:
         return None,"NO_EXACT_COMUNE",[]
+
+    reason_prefix="HISTORICAL_ALIAS" if alias_target else "EXACT_COMUNE"
     if len(cands)==1:
-        return cands[0],"EXACT_COMUNE_UNIQUE",cands
+        return cands[0],reason_prefix+"_UNIQUE",cands
+
     nr=norm(row.get("regione"))
     by_reg=[x for x in cands if nr and norm(x.get("regione"))==nr]
     if len(by_reg)==1:
-        return by_reg[0],"EXACT_COMUNE_REGIONE",cands
+        return by_reg[0],reason_prefix+"_REGIONE",cands
+
     np=norm(row.get("provincia"))
     by_prov=[x for x in cands if np and norm(x.get("provincia"))==np]
     if len(by_prov)==1:
-        return by_prov[0],"EXACT_COMUNE_PROVINCIA",cands
+        return by_prov[0],reason_prefix+"_PROVINCIA",cands
+
     return None,"AMBIGUOUS_COMUNE",cands
 
 def main(argv=None):
@@ -163,6 +190,7 @@ def main(argv=None):
             samples.append({
                 "pvp_id":str(r.get("pvp_id") or ""),
                 "comune":r.get("comune"),
+                "comune_canonico":match.get("comune"),
                 "codice_istat":match.get("codice_istat"),
                 "changes":diff,
                 "resolution":reason,
