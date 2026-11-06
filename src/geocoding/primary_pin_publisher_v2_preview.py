@@ -77,8 +77,10 @@ def municipality_fallback(loc,con,cache):
     comune=str(loc.get("comune_pvp") or "").strip()
     code="".join(ch for ch in str(loc.get("codice_istat") or "") if ch.isdigit())
     code=code.zfill(6)[-6:] if code else ""
-    if not comune or not code:
-        return None
+    if not comune:
+        return None, "MISSING_COMUNE_PVP"
+    if not code:
+        return None, "MISSING_CODICE_ISTAT"
     if code not in cache:
         row=con.execute(
             "select min_lat,max_lat,min_lon,max_lon,count from municipality_bbox where codice_istat=?",
@@ -93,8 +95,10 @@ def municipality_fallback(loc,con,cache):
         else:
             cache[code]=None
     rep=cache.get(code)
-    if not rep or not valid_pair(rep.get("lat"),rep.get("lon")):
-        return None
+    if not rep:
+        return None, "ANNCSU_BBOX_NOT_FOUND"
+    if not valid_pair(rep.get("lat"),rep.get("lon")):
+        return None, "ANNCSU_BBOX_INVALID_COORDS"
     return {
         "lat":float(rep["lat"]),
         "lon":float(rep["lon"]),
@@ -104,7 +108,7 @@ def municipality_fallback(loc,con,cache):
         "reason":"Punto indicativo del Comune del bene fisico PVP, derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
         "formatted_address":"Comune di "+comune,
         "fallback_from_status":str(loc.get("status") or "UNKNOWN"),
-    }
+    }, None
 
 def choose_pin(loc,con,cache):
     status=str(loc.get("status") or "").upper()
@@ -118,7 +122,7 @@ def choose_pin(loc,con,cache):
             "reason":str(loc.get("resolution_reason") or "Primary listing_location resolved"),
             "formatted_address":str(loc.get("formatted_address") or loc.get("address_raw") or ""),
             "fallback_from_status":None,
-        }
+        }, None
     # REVIEW / UNRESOLVED / NEEDS_COORD / PENDING are deliberately not trusted
     # as exact points. Preserve map coverage with an explicit municipality marker.
     return municipality_fallback(loc,con,cache)
@@ -169,19 +173,30 @@ def main(argv=None):
     counts=Counter()
     source_counts=Counter()
     precision_counts=Counter()
+    no_safe_pin_cases=[]
 
     for listing in listings:
         pid=str(listing["pvp_id"])
         loc=by_pid[pid]
-        pin=choose_pin(loc,ann_con,rep_cache)
+        pin,no_pin_reason=choose_pin(loc,ann_con,rep_cache)
         if pin is None:
             counts["NO_SAFE_PIN"]+=1
-            plans.append({
+            case={
                 "pvp_id":pid,
                 "action":"NO_SAFE_PIN",
                 "location_status":loc.get("status"),
                 "comune_pvp":loc.get("comune_pvp"),
-            })
+                "provincia_pvp":loc.get("provincia_pvp"),
+                "sigla_provincia_pvp":loc.get("sigla_provincia_pvp"),
+                "cap_pvp":loc.get("cap_pvp"),
+                "codice_istat":loc.get("codice_istat"),
+                "address_raw":loc.get("address_raw"),
+                "warnings":loc.get("warnings"),
+                "resolution_reason":loc.get("resolution_reason"),
+                "no_safe_pin_reason":no_pin_reason,
+            }
+            no_safe_pin_cases.append(case)
+            plans.append(case)
             continue
         action="PUBLISH_RESOLVED" if pin["fallback_from_status"] is None else "PUBLISH_COMUNE_FALLBACK"
         counts[action]+=1
@@ -216,6 +231,8 @@ def main(argv=None):
         "precisions":dict(precision_counts),
         "google_calls":0,
         "db_writes":0,
+        "no_safe_pin_reasons":dict(Counter(str(x.get("no_safe_pin_reason") or "UNKNOWN") for x in no_safe_pin_cases)),
+        "no_safe_pin_cases":no_safe_pin_cases,
         "sample":plans[:max(0,args.sample)],
     }
     out=REPORTS_DIR/"primary_pin_publisher_v2_preview.json"
