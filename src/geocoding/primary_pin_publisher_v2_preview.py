@@ -21,7 +21,7 @@ for p in (SRC,HERE,SRC/"importer",SRC/"pipeline"):
     if str(p) not in sys.path:
         sys.path.insert(0,str(p))
 
-from aste_paths import REPORTS_DIR, ANNCSU_DIR, ROOT_DIR, ensure_runtime_dirs
+from aste_paths import REPORTS_DIR, ANNCSU_DIR, DATA_DIR, ensure_runtime_dirs
 from project_env import load_project_env
 
 VERSION="primary_pin_publisher_v2_preview"
@@ -81,7 +81,7 @@ def open_anncsu_bbox():
     return con
 
 def open_istat_localities():
-    default_path=ROOT_DIR/"data"/"istat"/"istat_localita_2021.sqlite3"
+    default_path=DATA_DIR/"istat"/"istat_localita_2021.sqlite3"
     path=Path(os.environ.get("ISTAT_LOCALITY_INDEX","") or default_path).resolve()
     if not path.is_file():
         raise RuntimeError("ISTAT locality SQLite index missing: "+str(path))
