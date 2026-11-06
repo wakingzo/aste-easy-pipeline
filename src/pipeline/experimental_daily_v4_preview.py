@@ -61,6 +61,7 @@ def _verify_imported_locations(plan):
     expected={str(r[0]["pvp_id"]):len(r[3]) for r in plan["records"]}
     ids=list(expected)
     seen_listings=set()
+    bad_parent_pins=set()
     location_counts=Counter()
     primary_counts=Counter()
 
@@ -68,11 +69,19 @@ def _verify_imported_locations(plan):
         batch=ids[start:start+50]
         filt="in.("+",".join(batch)+")"
         listings=_get_json(base,key,"listings",{
-            "select":"pvp_id",
+            "select":"pvp_id,latitudine,longitudine,maps_link,geocode_status",
             "pvp_id":filt,
         })
         for row in listings:
-            seen_listings.add(str(row.get("pvp_id") or ""))
+            pid=str(row.get("pvp_id") or "")
+            seen_listings.add(pid)
+            if (
+                row.get("latitudine") is None
+                or row.get("longitudine") is None
+                or not row.get("maps_link")
+                or str(row.get("geocode_status") or "").upper()!="DONE"
+            ):
+                bad_parent_pins.add(pid)
 
         locations=_get_json(base,key,"listing_locations",{
             "select":"pvp_id,is_primary",
@@ -87,18 +96,20 @@ def _verify_imported_locations(plan):
     missing=sorted(set(ids)-seen_listings)
     bad_locations=sorted(pid for pid in ids if location_counts[pid] != expected[pid])
     bad_primary=sorted(pid for pid in ids if primary_counts[pid] != 1)
-    if missing or bad_locations or bad_primary:
+    if missing or bad_locations or bad_primary or bad_parent_pins:
         raise RuntimeError(
             "Post-import verification failed: "
             f"missing_listings={missing[:10]} "
             f"bad_location_counts={bad_locations[:10]} "
-            f"bad_primary_counts={bad_primary[:10]}"
+            f"bad_primary_counts={bad_primary[:10]} "
+            f"bad_parent_pins={sorted(bad_parent_pins)[:10]}"
         )
     return {
         "status":"PASS",
         "listings_verified":len(ids),
         "location_rows_verified":sum(location_counts.values()),
         "one_primary_per_listing":len(ids),
+        "parent_pins_verified":len(ids),
     }
 
 def _write_delta_raw(source_path, dest_path, wanted_ids):
