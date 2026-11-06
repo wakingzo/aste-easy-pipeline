@@ -61,10 +61,14 @@ def find_header_map(ws):
         if name_i is None: name_i=idx_contains("denominazione","comune")
         code_i=idx_contains("codice","comune","alfanumerico")
         if code_i is None: code_i=idx_contains("codice","comune")
-        prov_i=idx_contains("denominazione","provincia")
+        prov_i=idx_contains("denominazione","unita","territoriale","sovracomunale")
+        if prov_i is None:
+            prov_i=idx_contains("denominazione","provincia")
         sigla_i=idx_contains("sigla","automobilistica")
         reg_i=idx_contains("denominazione","regione")
-        tipo_i=idx_contains("tipologia","unita","sovracomunale")
+        tipo_i=idx_contains("tipologia","unita","territoriale","sovracomunale")
+        if tipo_i is None:
+            tipo_i=idx_contains("tipologia","unita","sovracomunale")
         if name_i is not None and code_i is not None and reg_i is not None:
             return row_no,{"name":name_i,"code":code_i,"province":prov_i,"sigla":sigla_i,"region":reg_i,"type":tipo_i}
     raise RuntimeError("Header ISTAT comuni non riconosciuto")
