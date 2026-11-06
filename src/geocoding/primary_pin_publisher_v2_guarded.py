@@ -87,10 +87,29 @@ def _one(base,key,pvp_id):
         raise RuntimeError("Expected exactly one listing pvp_id="+str(pvp_id))
     return rows[0]
 
-def build_plan(base,key):
-    listings=_all(base,key,"listings",{
-        "select":"pvp_id,comune,provincia,sigla_provincia,regione,latitudine,longitudine,maps_link,geocode_status,geocode_source,geocode_precision,geocode_decision_reason,geocode_formatted_address",
-        "geocode_status":"eq.PENDING","order":"pvp_id.asc"})
+def build_plan(base,key,target_ids=None):
+    select_fields="pvp_id,comune,provincia,sigla_provincia,regione,latitudine,longitudine,maps_link,geocode_status,geocode_source,geocode_precision,geocode_decision_reason,geocode_formatted_address"
+    if target_ids is None:
+        listings=_all(base,key,"listings",{
+            "select":select_fields,
+            "geocode_status":"eq.PENDING","order":"pvp_id.asc"})
+    else:
+        wanted=sorted({str(x) for x in target_ids},key=lambda x:int(x) if x.isdigit() else x)
+        listings=[]
+        for start in range(0,len(wanted),50):
+            batch=wanted[start:start+50]
+            if not batch:
+                continue
+            listings.extend(_get(base,key,"listings",{
+                "select":select_fields,
+                "pvp_id":"in.("+",".join(batch)+")",
+                "geocode_status":"eq.PENDING",
+            }))
+        got={str(x.get("pvp_id") or "") for x in listings}
+        missing=sorted(set(wanted)-got)
+        if missing:
+            raise RuntimeError("Target listing(s) missing or not PENDING: "+",".join(missing[:20]))
+        listings.sort(key=lambda x:int(str(x["pvp_id"])))
     ids=[str(x["pvp_id"]) for x in listings]
 
     primaries=[]
@@ -183,11 +202,29 @@ def same_value(a,b):
             pass
     return clean(a)==clean(b)
 
+def apply_plan(base,key,plan):
+    writes=0
+    for item in plan:
+        current=_one(base,key,item["pvp_id"])
+        for f,expected in item["before"].items():
+            if not same_value(current.get(f),expected):
+                raise RuntimeError(f"PRECONDITION FAILED pvp_id={item['pvp_id']} field={f}")
+        got=_patch(base,key,item["pvp_id"],item["after"])
+        if not isinstance(got,list) or len(got)!=1:
+            raise RuntimeError("Unexpected PATCH result pvp_id="+item["pvp_id"])
+        patched=got[0]
+        for f,expected in item["after"].items():
+            if not same_value(patched.get(f),expected):
+                raise RuntimeError(f"PATCH READBACK FAILED pvp_id={item['pvp_id']} field={f}")
+        writes+=1
+    return writes
+
 def main(argv=None):
     ap=argparse.ArgumentParser()
     ap.add_argument("--apply",action="store_true")
     ap.add_argument("--expected-count",type=int)
     ap.add_argument("--expected-plan-sha")
+    ap.add_argument("--pvp-ids",help="Comma-separated explicit cohort; default is all PENDING")
     args=ap.parse_args(argv)
 
     ensure_runtime_dirs()
@@ -195,7 +232,8 @@ def main(argv=None):
     base=os.environ["SUPABASE_URL"].rstrip("/")
     key=os.environ["SUPABASE_SERVICE_ROLE"]
 
-    plan,actions,sources,precisions,boundary_counts=build_plan(base,key)
+    target_ids=[x.strip() for x in (args.pvp_ids or "").split(",") if x.strip()] or None
+    plan,actions,sources,precisions,boundary_counts=build_plan(base,key,target_ids=target_ids)
     sha=sha_plan(plan)
     summary={
         "version":VERSION,
@@ -226,25 +264,24 @@ def main(argv=None):
     if sha!=args.expected_plan_sha:
         raise RuntimeError("PLAN SHA MISMATCH; zero writes")
 
-    writes=0
-    for item in plan:
-        current=_one(base,key,item["pvp_id"])
-        for f,expected in item["before"].items():
-            if not same_value(current.get(f),expected):
-                raise RuntimeError(f"PRECONDITION FAILED pvp_id={item['pvp_id']} field={f}")
-        got=_patch(base,key,item["pvp_id"],item["after"])
-        if not isinstance(got,list) or len(got)!=1:
-            raise RuntimeError("Unexpected PATCH result pvp_id="+item["pvp_id"])
-        patched=got[0]
-        for f,expected in item["after"].items():
-            if not same_value(patched.get(f),expected):
-                raise RuntimeError(f"PATCH READBACK FAILED pvp_id={item['pvp_id']} field={f}")
-        writes+=1
+    writes=apply_plan(base,key,plan)
 
-    remaining=_all(base,key,"listings",{
-        "select":"pvp_id","geocode_status":"eq.PENDING","order":"pvp_id.asc"})
-    if remaining:
-        raise RuntimeError(f"POST VERIFY FAILED: {len(remaining)} PENDING remain")
+    if target_ids is None:
+        remaining=_all(base,key,"listings",{
+            "select":"pvp_id","geocode_status":"eq.PENDING","order":"pvp_id.asc"})
+        if remaining:
+            raise RuntimeError(f"POST VERIFY FAILED: {len(remaining)} PENDING remain")
+    else:
+        remaining=[]
+        for start in range(0,len(target_ids),50):
+            batch=target_ids[start:start+50]
+            remaining.extend(_get(base,key,"listings",{
+                "select":"pvp_id",
+                "pvp_id":"in.("+",".join(batch)+")",
+                "geocode_status":"eq.PENDING",
+            }))
+        if remaining:
+            raise RuntimeError(f"POST VERIFY FAILED: {len(remaining)} target PENDING remain")
 
     summary["db_writes"]=writes
     summary["post_verify"]="PASS"
