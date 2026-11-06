@@ -5,8 +5,11 @@ import argparse
 import hashlib
 import json
 import os
+import socket
+import time
 from collections import Counter
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -23,11 +26,29 @@ import pvp_import_consolidated_preview as previous
 VERSION="administrative_normalization_guarded_v1"
 PAGE=1000
 
+def _is_transient_transport(exc):
+    if isinstance(exc,(ConnectionResetError,ConnectionAbortedError,TimeoutError,socket.timeout,URLError)):
+        return True
+    if isinstance(exc,OSError):
+        return getattr(exc,"winerror",None) in {10053,10054,10060} or getattr(exc,"errno",None) in {54,60,104,110}
+    # http.client.RemoteDisconnected subclasses ConnectionResetError on some
+    # runtimes and OSError on others; keep a final class-name guard.
+    return type(exc).__name__=="RemoteDisconnected"
+
 def _get(base,key,path,params):
     url=base.rstrip("/")+"/rest/v1/"+path+"?"+urlencode(params,safe="(),.*")
-    req=Request(url,method="GET",headers={"apikey":key,"Authorization":"Bearer "+key,"Accept":"application/json"})
-    with urlopen(req,timeout=120) as r:
-        return json.loads(r.read().decode("utf-8") or "[]")
+    max_attempts=4
+    for attempt in range(max_attempts):
+        req=Request(url,method="GET",headers={"apikey":key,"Authorization":"Bearer "+key,"Accept":"application/json"})
+        try:
+            with urlopen(req,timeout=120) as r:
+                return json.loads(r.read().decode("utf-8") or "[]")
+        except Exception as exc:
+            if not _is_transient_transport(exc) or attempt>=max_attempts-1:
+                raise
+            print(f"[HTTP RETRY] {path} transient {type(exc).__name__}; retry {attempt+2}/{max_attempts}",flush=True)
+            time.sleep(1.5*(attempt+1))
+    raise RuntimeError("HTTP retry loop exhausted")
 
 def _all(base,key,path,params):
     out=[]; offset=0
