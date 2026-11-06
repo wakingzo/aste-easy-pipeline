@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -21,6 +22,8 @@ for p in (SRC, SRC/"pipeline", SRC/"importer", SRC/"geocoding", SRC/"audit"):
 from aste_paths import RAW_DIR, REPORTS_DIR, ensure_runtime_dirs
 import daily_pipeline_v3_18 as production_daily
 import pvp_import_atomic_v2 as importer_v2
+import primary_pin_publisher_v2_preview as pin_preview
+import istat_boundary_runtime_v11_6 as boundary_runtime
 
 VERSION="experimental_daily_v4_preview"
 RAW=Path(RAW_DIR)/"listings_api_raw.jsonl"
@@ -119,11 +122,108 @@ def _write_delta_raw(source_path, dest_path, wanted_ids):
     tmp.replace(dest_path)
     return {"wanted_ids":len(wanted),"rows":rows}
 
+def _attach_primary_pins(plan):
+    ann=pin_preview.open_anncsu_bbox()
+    istat=pin_preview.open_istat_localities()
+    boundary=boundary_runtime.BoundaryContext()
+    cache={}
+    actions=Counter()
+    sources=Counter()
+    precisions=Counter()
+    boundary_counts=Counter()
+    pin_rows=[]
+    rebuilt=[]
+    try:
+        for listing,subjects,attachments,locations in plan["records"]:
+            primaries=[x for x in locations if x.get("is_primary") is True]
+            if len(primaries)!=1:
+                raise RuntimeError(
+                    f"PIN ATTACH requires exactly one primary location pvp_id={listing.get('pvp_id')} got={len(primaries)}"
+                )
+            loc=primaries[0]
+            pin,reason=pin_preview.choose_pin(loc,ann,istat,cache)
+            if pin is None:
+                raise RuntimeError(f"NO_SAFE_PIN pvp_id={listing.get('pvp_id')} reason={reason}")
+
+            if pin.get("source")=="PVP" and pin.get("precision")=="PVP_COORD":
+                check=boundary.test(
+                    {
+                        "comune":listing.get("comune"),
+                        "provincia":listing.get("provincia"),
+                        "sigla_provincia":listing.get("sigla_provincia"),
+                        "regione":listing.get("regione"),
+                    },
+                    lat=pin.get("lat"),lon=pin.get("lon"),
+                )
+                position=str(check.get("position") or "UNKNOWN")
+                boundary_counts[position]+=1
+                if check.get("safe"):
+                    pin=dict(pin)
+                    pin["reason"]="Coordinate fornite dal bene PVP e validate territorialmente nel confine comunale ISTAT 2026 ("+position+")."
+                else:
+                    fallback,fallback_reason=pin_preview.municipality_fallback(loc,ann,istat,cache)
+                    if fallback is None:
+                        raise RuntimeError(
+                            f"PVP_COORD_NOT_TERRITORIALLY_SAFE pvp_id={listing.get('pvp_id')} "
+                            f"position={position} fallback={fallback_reason}"
+                        )
+                    pin=fallback
+                    pin["reason"] += " Coordinate PVP scartate dal controllo territoriale ISTAT 2026 ("+position+")."
+
+            action="PUBLISH_RESOLVED" if pin["fallback_from_status"] is None else "PUBLISH_COMUNE_FALLBACK"
+            actions[action]+=1
+            sources[str(pin["source"])]+=1
+            precisions[str(pin["precision"])]+=1
+
+            row=dict(listing)
+            row.update({
+                "latitudine":float(pin["lat"]),
+                "longitudine":float(pin["lon"]),
+                "maps_link":pin_preview.maps_link(pin["lat"],pin["lon"]),
+                "geocode_status":"DONE",
+                "geocode_source":pin["source"],
+                "geocode_precision":pin["precision"],
+                "geocode_decision_reason":pin["reason"],
+                "geocode_formatted_address":pin["formatted_address"],
+            })
+            rebuilt.append((row,subjects,attachments,locations))
+            pin_rows.append({
+                "pvp_id":str(row["pvp_id"]),
+                "latitudine":row["latitudine"],
+                "longitudine":row["longitudine"],
+                "maps_link":row["maps_link"],
+                "geocode_status":row["geocode_status"],
+                "geocode_source":row["geocode_source"],
+                "geocode_precision":row["geocode_precision"],
+                "geocode_decision_reason":row["geocode_decision_reason"],
+                "geocode_formatted_address":row["geocode_formatted_address"],
+            })
+    finally:
+        ann.close()
+        istat.close()
+
+    pin_rows.sort(key=lambda x:int(x["pvp_id"]))
+    canonical=json.dumps(pin_rows,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+    pin_sha=hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    out=dict(plan)
+    out["records"]=rebuilt
+    return out,{
+        "count":len(pin_rows),
+        "actions":dict(actions),
+        "sources":dict(sources),
+        "precisions":dict(precisions),
+        "pvp_boundary_validation":dict(boundary_counts),
+        "plan_sha256":pin_sha,
+        "google_calls":0,
+    }
+
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Aste Easy experimental daily v4; preview by default, guarded apply optional")
     ap.add_argument("--apply",action="store_true")
     ap.add_argument("--expected-new",type=int)
     ap.add_argument("--expected-raw-sha256")
+    ap.add_argument("--expected-pin-plan-sha")
     ap.add_argument("--page-size",type=int,default=200)
     ap.add_argument("--safety-days",type=int,default=2)
     args=ap.parse_args(argv)
@@ -208,13 +308,24 @@ def main(argv=None):
     plan["locations"]=sum(len(r[3]) for r in rebuilt_records)
     plan["location_plan_sources"]={"EXPERIMENTAL_PREVIEW":len(rebuilt_records)}
     timings["attach_locations"]=round(0.0,3)
+
+    t=time.perf_counter()
+    plan,pin_plan=_attach_primary_pins(plan)
+    timings["attach_primary_pins"]=round(time.perf_counter()-t,3)
+
     if args.apply:
-        if args.expected_new is None or not args.expected_raw_sha256:
-            raise RuntimeError("--apply requires --expected-new and --expected-raw-sha256 from the latest preview")
-        if args.expected_new != len(plan["records"]) or args.expected_raw_sha256 != plan["raw_sha256"]:
+        if args.expected_new is None or not args.expected_raw_sha256 or not args.expected_pin_plan_sha:
             raise RuntimeError(
-                "APPLY AUTHORIZATION MISMATCH: current plan differs from preview; zero writes. "
-                "Run preview again and use its eligible_new + raw_sha256."
+                "--apply requires --expected-new, --expected-raw-sha256 and --expected-pin-plan-sha from the latest preview"
+            )
+        if (
+            args.expected_new != len(plan["records"])
+            or args.expected_raw_sha256 != plan["raw_sha256"]
+            or args.expected_pin_plan_sha != pin_plan["plan_sha256"]
+        ):
+            raise RuntimeError(
+                "APPLY AUTHORIZATION MISMATCH: current import/pin plan differs from preview; zero writes. "
+                "Run preview again and use eligible_new + raw_sha256 + pin_plan.plan_sha256."
             )
     importer_summary=importer_v2.run(
         apply=args.apply,
@@ -251,6 +362,7 @@ def main(argv=None):
         "new_allegati":importer_summary.get("new_allegati"),
         "new_locations":importer_summary.get("new_locations"),
         "location_plan_sources":importer_summary.get("location_plan_sources"),
+        "pin_plan":pin_plan,
         "raw_sha256":importer_summary.get("raw_sha256"),
         "db_writes":importer_summary.get("inserted",0) if args.apply else 0,
         "inserted":importer_summary.get("inserted",0),
