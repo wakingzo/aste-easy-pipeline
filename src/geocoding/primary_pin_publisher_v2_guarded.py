@@ -22,6 +22,7 @@ for p in (SRC,HERE):
 from aste_paths import REPORTS_DIR, ensure_runtime_dirs
 from project_env import load_project_env
 import primary_pin_publisher_v2_preview as preview
+import istat_boundary_runtime_v11_6 as boundary_runtime
 
 VERSION="primary_pin_publisher_v2_guarded"
 PAGE=500
@@ -88,7 +89,7 @@ def _one(base,key,pvp_id):
 
 def build_plan(base,key):
     listings=_all(base,key,"listings",{
-        "select":"pvp_id,latitudine,longitudine,maps_link,geocode_status,geocode_source,geocode_precision,geocode_decision_reason,geocode_formatted_address",
+        "select":"pvp_id,comune,provincia,sigla_provincia,regione,latitudine,longitudine,maps_link,geocode_status,geocode_source,geocode_precision,geocode_decision_reason,geocode_formatted_address",
         "geocode_status":"eq.PENDING","order":"pvp_id.asc"})
     ids=[str(x["pvp_id"]) for x in listings]
 
@@ -111,15 +112,44 @@ def build_plan(base,key):
 
     ann=preview.open_anncsu_bbox()
     istat=preview.open_istat_localities()
+    boundary=boundary_runtime.BoundaryContext()
     cache={}
     plan=[]
     actions=Counter(); sources=Counter(); precisions=Counter()
+    boundary_counts=Counter()
     try:
         for row in listings:
             pid=str(row["pvp_id"]); loc=by_pid[pid]
             pin,reason=preview.choose_pin(loc,ann,istat,cache)
             if pin is None:
                 raise RuntimeError(f"NO_SAFE_PIN pvp_id={pid} reason={reason}")
+
+            if pin.get("source")=="PVP" and pin.get("precision")=="PVP_COORD":
+                check=boundary.test(
+                    {
+                        "comune":row.get("comune"),
+                        "provincia":row.get("provincia"),
+                        "sigla_provincia":row.get("sigla_provincia"),
+                        "regione":row.get("regione"),
+                    },
+                    lat=pin.get("lat"),
+                    lon=pin.get("lon"),
+                )
+                position=str(check.get("position") or "UNKNOWN")
+                boundary_counts[position]+=1
+                if check.get("safe"):
+                    pin=dict(pin)
+                    pin["reason"]="Coordinate fornite dal bene PVP e validate territorialmente nel confine comunale ISTAT 2026 ("+position+")."
+                else:
+                    fallback,fallback_reason=preview.municipality_fallback(loc,ann,istat,cache)
+                    if fallback is None:
+                        raise RuntimeError(
+                            f"PVP_COORD_NOT_TERRITORIALLY_SAFE pvp_id={pid} position={position} "
+                            f"and municipality fallback unavailable: {fallback_reason}"
+                        )
+                    pin=fallback
+                    pin["reason"] += " Coordinate PVP scartate dal controllo territoriale ISTAT 2026 ("+position+")."
+
             action="PUBLISH_RESOLVED" if pin["fallback_from_status"] is None else "PUBLISH_COMUNE_FALLBACK"
             after={
                 "latitudine":float(pin["lat"]),
@@ -175,6 +205,7 @@ def main(argv=None):
         "actions":actions,
         "sources":sources,
         "precisions":precisions,
+        "pvp_boundary_validation":dict(boundary_counts),
         "plan_sha256":sha,
         "google_calls":0,
         "db_writes":0,
