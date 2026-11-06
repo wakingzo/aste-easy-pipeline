@@ -102,6 +102,8 @@ def main(argv=None):
     missing_maps_with_coords = []
     done_without_coords = []
     pending_without_coords = []
+    missing_by_geocode_status = Counter()
+    missing_upcoming_by_geocode_status = Counter()
 
     for r in rows:
         coord = classify(r)
@@ -124,8 +126,10 @@ def main(argv=None):
 
         if coord != "VALID_COORDS":
             missing_any.append(r)
+            missing_by_geocode_status[gs] += 1
             if is_active and is_upcoming:
                 missing_upcoming_active.append(r)
+                missing_upcoming_by_geocode_status[gs] += 1
 
         if coord == "VALID_COORDS" and not str(r.get("maps_link") or "").strip():
             missing_maps_with_coords.append(r)
@@ -172,6 +176,10 @@ def main(argv=None):
         "valid_coords_but_missing_maps_link": len(missing_maps_with_coords),
         "done_but_missing_or_invalid_coords": len(done_without_coords),
         "pending_but_missing_or_invalid_coords": len(pending_without_coords),
+        "missing_by_geocode_status": dict(missing_by_geocode_status),
+        "missing_upcoming_active_by_geocode_status": dict(missing_upcoming_by_geocode_status),
+        "historical_missing_excluding_pending": len([x for x in missing_any if str(x.get("geocode_status") or "NULL").upper() != "PENDING"]),
+        "historical_missing_upcoming_active_excluding_pending": len([x for x in missing_upcoming_active if str(x.get("geocode_status") or "NULL").upper() != "PENDING"]),
         "samples": {
             "missing_upcoming_active": [compact(x) for x in missing_upcoming_active[:max(0, args.sample)]],
             "done_without_coords": [compact(x) for x in done_without_coords[:max(0, args.sample)]],
