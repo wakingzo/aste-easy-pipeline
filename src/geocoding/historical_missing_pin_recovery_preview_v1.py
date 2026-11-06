@@ -9,6 +9,7 @@ import re
 import sqlite3
 import unicodedata
 from collections import Counter, defaultdict
+from statistics import median
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -126,30 +127,53 @@ def resolve_code(row,index):
     if len(r)==1: return r[0],"EXACT_COMUNE_REGIONE",cands
     return None,"AMBIGUOUS_COMUNE",cands
 
+def representative_point(rows):
+    pts=[r for r in rows if valid_pair(r["lat"],r["lon"])]
+    if not pts: return None
+    mlat=median(float(r["lat"]) for r in pts)
+    mlon=median(float(r["lon"]) for r in pts)
+    return min(pts,key=lambda r:(float(r["lat"])-mlat)**2+(float(r["lon"])-mlon)**2)
+
 def municipality_pin(code,comune,ann_con,istat_con,cache):
+    code=clean(code)
     cache_key=code+"|"+norm(comune)
     if cache_key in cache: return cache[cache_key]
-    row=ann_con.execute(
-        "select min_lat,max_lat,min_lon,max_lon from municipality_bbox where codice_istat=?",(code,)
-    ).fetchone()
-    if row:
-        rep={"lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
-             "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
-             "source":"anncsu_comune_indicativo"}
-        if valid_pair(rep["lat"],rep["lon"]):
+
+    if code:
+        row=ann_con.execute(
+            "select min_lat,max_lat,min_lon,max_lon from municipality_bbox where codice_istat=?",(code,)
+        ).fetchone()
+        if row:
+            rep={"lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
+                 "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
+                 "source":"anncsu_comune_indicativo"}
+            if valid_pair(rep["lat"],rep["lon"]):
+                cache[cache_key]=rep; return rep
+
+        same_name=list(istat_con.execute(
+            "select pro_com,nome,lat,lon from localities where pro_com=? and nome_norm=?",(code,norm(comune))
+        ))
+        r=representative_point(same_name)
+        if r is not None:
+            rep={"lat":float(r["lat"]),"lon":float(r["lon"]),"source":"istat_comune_indicativo",
+                 "matched_pro_com":str(r["pro_com"]),"match_mode":"SAME_CODE_EXACT_NAME"}
             cache[cache_key]=rep; return rep
 
-    rows=list(istat_con.execute(
-        "select pro_com,nome,lat,lon from localities where pro_com=? and nome_norm=?",(code,norm(comune))
-    ))
-    if len(rows)==1 and valid_pair(rows[0]["lat"],rows[0]["lon"]):
-        rep={"lat":float(rows[0]["lat"]),"lon":float(rows[0]["lon"]),"source":"istat_comune_indicativo",
-             "matched_pro_com":str(rows[0]["pro_com"]),"match_mode":"SAME_CODE_EXACT_NAME"}
-        cache[cache_key]=rep; return rep
+        # Some municipalities have no locality point named exactly like the
+        # municipality. In that case choose an actual ISTAT locality point
+        # nearest the median of all locality points inside the same municipality.
+        same_code=list(istat_con.execute(
+            "select pro_com,nome,lat,lon from localities where pro_com=?",(code,)
+        ))
+        r=representative_point(same_code)
+        if r is not None:
+            rep={"lat":float(r["lat"]),"lon":float(r["lon"]),"source":"istat_comune_medoid_indicativo",
+                 "matched_pro_com":str(r["pro_com"]),"match_mode":"SAME_CODE_LOCALITIES_MEDOID"}
+            cache[cache_key]=rep; return rep
 
-    # Compatibility fallback for municipality-code/version changes (not fuzzy).
-    # Accept an exact locality/municipality name only when it belongs to one
-    # distinct ISTAT 2021 municipality code nationwide.
+    # Compatibility fallback for municipality-code/version changes or historical
+    # municipality names. Exact name only: no fuzzy matching. Multiple locality
+    # points are allowed only when they all belong to one ISTAT municipality.
     global_rows=list(istat_con.execute(
         "select pro_com,nome,lat,lon from localities where nome_norm=?",(norm(comune),)
     ))
@@ -159,8 +183,8 @@ def municipality_pin(code,comune,ann_con,istat_con,cache):
             by_code.setdefault(str(r["pro_com"]),[]).append(r)
     if len(by_code)==1:
         old_code,next_rows=next(iter(by_code.items()))
-        if len(next_rows)==1:
-            r=next_rows[0]
+        r=representative_point(next_rows)
+        if r is not None:
             rep={"lat":float(r["lat"]),"lon":float(r["lon"]),
                  "source":"istat_nome_univoco_indicativo",
                  "matched_pro_com":old_code,"match_mode":"GLOBAL_EXACT_NAME_UNIQUE_CODE"}
@@ -211,13 +235,28 @@ def main(argv=None):
             code_reason="EXISTING_ISTAT_CODE"
             if not code:
                 match,code_reason,cands=resolve_code(r,comuni_index)
-                if not match:
-                    counts["NO_SAFE_PIN"]+=1; code_resolution[code_reason]+=1
+                if match:
+                    code=match["code"]
+                else:
+                    # Historical/ceased municipality name: before giving up,
+                    # try the exact name against the ISTAT 2021 locality index.
+                    pin=municipality_pin("",clean(r.get("comune")),ann_con,istat_con,cache)
+                    code_resolution[code_reason]+=1
+                    if pin:
+                        action="PUBLISH_COMUNE_FALLBACK"
+                        counts[action]+=1; pin_sources[pin["source"]]+=1
+                        plans.append({"pvp_id":pid,"action":action,"comune":r.get("comune"),"provincia":r.get("provincia"),
+                                      "regione":r.get("regione"),"latitudine":pin["lat"],"longitudine":pin["lon"],
+                                      "maps_link":maps_link(pin["lat"],pin["lon"]),"source":pin["source"],
+                                      "precision":"COMUNE","code_resolution":code_reason,
+                                      "matched_pro_com":pin.get("matched_pro_com"),
+                                      "match_mode":pin.get("match_mode")})
+                        continue
+                    counts["NO_SAFE_PIN"]+=1
                     plans.append({"pvp_id":pid,"action":"NO_SAFE_PIN","comune":r.get("comune"),"provincia":r.get("provincia"),
                                   "regione":r.get("regione"),"code_resolution":code_reason,
                                   "candidate_count":len(cands)})
                     continue
-                code=match["code"]
             code_resolution[code_reason]+=1
             pin=municipality_pin(code,clean(r.get("comune")),ann_con,istat_con,cache)
             if not pin:
