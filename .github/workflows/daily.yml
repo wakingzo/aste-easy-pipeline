@@ -247,11 +247,12 @@ jobs:
         shell: bash
         run: touch "$RUNNER_TEMP/aste-easy-run-start"
 
-      - name: Run Aste Easy v3.18 production update
+      - name: Run Aste Easy experimental v4 guarded auto update
         shell: bash
         run: |
           set -euo pipefail
-          docker compose run --rm daily
+          docker compose run --rm daily \
+            python src/pipeline/experimental_daily_v4_preview.py --auto-apply
 
       - name: Collect reports created by this run
         if: always()
@@ -304,7 +305,8 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          candidates = list(Path('runtime/reports').glob('daily_manifest_v3_18_*.json'))
+          candidates = list(Path('runtime/reports').glob('experimental_daily_v4_apply.json'))
+          candidates += list(Path('runtime/reports').glob('daily_manifest_v3_18_*.json'))
           candidates += list(Path('runtime/reports').glob('daily_run_v3_18_*.json'))
           if not candidates:
               print('## Aste Easy\n\nNo v3.18 daily summary found.', file=open(Path.home()/Path('summary.txt'),'w'))
@@ -313,7 +315,7 @@ jobs:
           obj = json.loads(p.read_text(encoding='utf-8-sig'))
           t = obj.get('timings_seconds') or {}
           lines = [
-              '## Aste Easy v3.18',
+              '## Aste Easy daily',
               '',
               f'- Report: `{p.name}`',
               f'- Status: **{obj.get("status", "UNKNOWN")}**',

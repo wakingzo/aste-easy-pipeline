@@ -1023,8 +1023,6 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     soggetti = detail_body.get("soggetti") or []
     lotto = detail_body.get("lotto") or {}
 
-    delegato, custode = choose_people(soggetti)
-
     descrizione = sanitize_text(search_item.get("descLotto")) or sanitize_text(lotto.get("descLotto")) or sanitize_text(detail_body.get("descLotto"))
     lotto_txt = sanitize_text(search_item.get("numeroLotto")) or sanitize_text(detail_body.get("codiLotto")) or sanitize_text(lotto.get("numeroLotto"))
 
@@ -1054,8 +1052,6 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         "prezzo_base": euro_to_db_text(search_item.get("prezzoBaseAsta")),
         "offerta_minima": euro_to_db_text(search_item.get("offertaMinima")),
         "rialzo_minimo": rialzo_txt,
-        "delegato_vendita": delegato,
-        "custode": custode,
         "vani": extract_field_from_beni(detail_body, ["numeroVani", "vani"]),
         "piano": extract_field_from_beni(detail_body, ["piano", "descPiano", "ubicazionePiano"]),
         "superficie_mq": extract_field_from_beni(detail_body, ["superficie", "superficieCommerciale", "superficieMq"], "mq"),

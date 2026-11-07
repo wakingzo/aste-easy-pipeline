@@ -16,7 +16,9 @@ COPY requirements-container.txt /tmp/requirements-container.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-container.txt
 
 COPY . /app
-RUN chmod +x /app/docker/entrypoint.sh
+# Windows checkouts may materialize shell scripts with CRLF; normalize before execution.
+RUN find /app -type f -name '*.sh' -exec sed -i 's/\r$//' {} + \
+ && chmod +x /app/docker/entrypoint.sh
 
 ENTRYPOINT ["/app/docker/entrypoint.sh"]
 CMD ["python", "src/pipeline/daily_pipeline_v3_18.py", "--run"]
