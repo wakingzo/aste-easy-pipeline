@@ -61,6 +61,52 @@ begin
             message = 'aste_insert_new_listing_v2: inserted listing not found by pvp_id';
     end if;
 
+    -- v2 owns publication of the validated parent map pin.  v1 predates these
+    -- fields and may ignore them, so copy only keys explicitly supplied by the
+    -- caller.  This remains in the same transaction as parent + children.
+    update public.listings l
+       set latitudine = case
+               when p_listing ? 'latitudine'
+               then nullif(p_listing ->> 'latitudine', '')::double precision
+               else l.latitudine
+           end,
+           longitudine = case
+               when p_listing ? 'longitudine'
+               then nullif(p_listing ->> 'longitudine', '')::double precision
+               else l.longitudine
+           end,
+           maps_link = case
+               when p_listing ? 'maps_link'
+               then nullif(p_listing ->> 'maps_link', '')
+               else l.maps_link
+           end,
+           geocode_status = case
+               when p_listing ? 'geocode_status'
+               then nullif(p_listing ->> 'geocode_status', '')
+               else l.geocode_status
+           end,
+           geocode_source = case
+               when p_listing ? 'geocode_source'
+               then nullif(p_listing ->> 'geocode_source', '')
+               else l.geocode_source
+           end,
+           geocode_precision = case
+               when p_listing ? 'geocode_precision'
+               then nullif(p_listing ->> 'geocode_precision', '')
+               else l.geocode_precision
+           end,
+           geocode_decision_reason = case
+               when p_listing ? 'geocode_decision_reason'
+               then nullif(p_listing ->> 'geocode_decision_reason', '')
+               else l.geocode_decision_reason
+           end,
+           geocode_formatted_address = case
+               when p_listing ? 'geocode_formatted_address'
+               then nullif(p_listing ->> 'geocode_formatted_address', '')
+               else l.geocode_formatted_address
+           end
+     where l.listing_id = v_listing_id;
+
     if jsonb_typeof(coalesce(p_locations, '[]'::jsonb)) <> 'array' then
         raise exception using
             errcode = '22023',
