@@ -35,6 +35,7 @@ from project_env import load_project_env
 
 VERSION = "atomic_import_v2"
 RPC = "aste_insert_new_listing_v2"
+VALIDATOR_RPC = "aste_validate_new_listing_v2"
 # Only these columns from the read-only preview may be sent to the RPC.
 LISTING_COLS = frozenset(previous.LISTINGS_FIELDS) - {
     "latitudine", "longitudine", "maps_link"
@@ -521,6 +522,41 @@ def _is_transient_transport(exc):
     return False
 
 
+def rpc_validate(base, key, listing, subjects, attachments, locations):
+    """Execute the real v2 payload semantics but roll back all writes in SQL."""
+    url = base.rstrip("/") + "/rest/v1/rpc/" + VALIDATOR_RPC
+    data = json.dumps({
+        "p_listing": listing,
+        "p_soggetti": subjects,
+        "p_allegati": attachments,
+        "p_locations": locations,
+    }, ensure_ascii=False).encode("utf-8")
+    req = Request(url, data=data, method="POST", headers={
+        "apikey": key, "Authorization": "Bearer " + key,
+        "Content-Type": "application/json", "Accept": "application/json"
+    })
+    try:
+        with urlopen(req, timeout=120) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(
+            f"VALIDATOR RPC error HTTP {exc.code} for pvp_id={listing['pvp_id']}: {detail}"
+        ) from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Validator RPC returned unexpected response")
+    if result.get("validated") is not True or result.get("rolled_back") is not True:
+        raise RuntimeError(
+            f"Validator RPC did not confirm rollback for pvp_id={listing['pvp_id']}"
+        )
+    rpc_result = result.get("rpc_result")
+    if not isinstance(rpc_result, dict) or rpc_result.get("pvp_id") != listing["pvp_id"]:
+        raise RuntimeError(
+            f"Validator RPC returned unexpected nested result for pvp_id={listing['pvp_id']}"
+        )
+    return result
+
+
 def rpc_insert(base, key, listing, subjects, attachments, locations):
     """Idempotent RPC insert with transport retry.
 
@@ -594,6 +630,7 @@ def run(*, apply=False, expected_new=None, expected_sha=None, preview_geo=None, 
                "raw_sha256": plan["raw_sha256"], "google_calls": 0,
                "inserted": 0, "inserted_pvp_ids": [], "skipped_concurrent": 0, "existing_writes": 0,
                "rpc_network_retries": 0, "rpc_recovered_after_transport": 0,
+               "validator_checked": 0,
                "planner_stats": plan.get("planner_stats", {})}
     if not apply and preview_geo is not None:
         summary["geocode_preview"] = preview_geo([r[0] for r in records])
@@ -603,8 +640,20 @@ def run(*, apply=False, expected_new=None, expected_sha=None, preview_geo=None, 
         if expected_new != len(records) or expected_sha != plan["raw_sha256"]:
             raise RuntimeError("Preview count or RAW checksum changed; no writes. Run preview again")
         base, key = os.environ["SUPABASE_URL"].rstrip("/"), os.environ["SUPABASE_SERVICE_ROLE"]
+
+        # Fail closed before the first real write: execute every exact payload
+        # through the rollback validator RPC.
+        total = len(records)
+        if total:
+            print(f"[VALIDATOR] checking {total} exact v2 payloads with forced rollback", flush=True)
+        for idx, (row, ss, aa, locations) in enumerate(records, 1):
+            rpc_validate(base, key, row, ss, aa, locations)
+            summary["validator_checked"] += 1
+            step = 25 if total <= 500 else 100
+            if idx == 1 or idx % step == 0 or idx == total:
+                print(f"[VALIDATOR] {idx}/{total} PASS", flush=True)
+
         try:
-            total = len(records)
             if total:
                 print(f"[IMPORT] starting atomic RPC insert: {total} listings", flush=True)
             for idx, (row, ss, aa, locations) in enumerate(records, 1):
