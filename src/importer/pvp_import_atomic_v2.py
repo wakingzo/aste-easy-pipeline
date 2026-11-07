@@ -69,26 +69,11 @@ def fingerprint(row):
 
 
 def prepare_listing(preview_row, raw_object):
-    geo = previous.primary_geo(raw_object)
+    del raw_object
     row = {key: value for key, value in preview_row.items() if key in LISTING_COLS and value not in ("", None)}
-    # The preview's text/geography is the source of truth; raw PVP coordinates
-    # are separate. Coordinates and Maps link are not published until checked.
+    # Parent listing carries business fields only. Validated published map fields
+    # are attached later; resolver/raw geography lives in listing_locations.
     row["pvp_id"] = str(preview_row["pvp_id"])
-    detail = raw_object.get("detail_body") or {}
-    beni = list(detail.get("beni") or []) + list((detail.get("lotto") or {}).get("beni") or [])
-    n_beni = len(beni)
-    if geo["source"] == "bene":
-        selected_index = next((i for i, bene in enumerate(beni)
-            if isinstance(bene, dict) and isinstance(bene.get("indirizzo"), dict) and
-            previous.first_non_empty(bene["indirizzo"].get("descComune"),
-                                     bene["indirizzo"].get("citta"),
-                                     bene["indirizzo"].get("comune"))), None)
-        if selected_index is None:
-            raise ValueError("Selected geographic bene not found")
-        kind = "bene_multi" if n_beni > 1 else "bene"
-        _ = f"{kind}:{selected_index+1}/{n_beni}"
-    else:
-        _ = geo["source"] + ("_multi" if n_beni > 1 else "")
     return row
 
 
