@@ -247,12 +247,12 @@ jobs:
         shell: bash
         run: touch "$RUNNER_TEMP/aste-easy-run-start"
 
-      - name: Run Aste Easy experimental v4 guarded auto update
+      - name: Run Aste Easy daily v4 guarded auto update
         shell: bash
         run: |
           set -euo pipefail
           docker compose run --rm daily \
-            python src/pipeline/experimental_daily_v4_preview.py --auto-apply
+            python src/pipeline/daily_pipeline_v4.py --auto-apply
 
       - name: Collect reports created by this run
         if: always()
