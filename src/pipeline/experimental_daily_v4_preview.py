@@ -58,10 +58,25 @@ def _get_json(base,key,path,params):
 def _verify_imported_locations(plan):
     base=os.environ["SUPABASE_URL"].rstrip("/")
     key=os.environ["SUPABASE_SERVICE_ROLE"]
-    expected={str(r[0]["pvp_id"]):len(r[3]) for r in plan["records"]}
-    ids=list(expected)
+    expected_counts={str(r[0]["pvp_id"]):len(r[3]) for r in plan["records"]}
+    expected_primary={}
+    for listing,_,_,locations in plan["records"]:
+        pid=str(listing["pvp_id"])
+        primaries=[x for x in locations if x.get("is_primary") is True]
+        if len(primaries)!=1:
+            raise RuntimeError(f"Verification plan has invalid primary count pvp_id={pid}")
+        expected_primary[pid]={
+            "latitudine":float(listing["latitudine"]),
+            "longitudine":float(listing["longitudine"]),
+            "maps_link":listing["maps_link"],
+            "geocode_precision":str(listing.get("geocode_precision") or ""),
+            "location":primaries[0],
+        }
+
+    ids=list(expected_counts)
     seen_listings=set()
     bad_parent_pins=set()
+    bad_primary_payload=set()
     location_counts=Counter()
     primary_counts=Counter()
 
@@ -69,22 +84,29 @@ def _verify_imported_locations(plan):
         batch=ids[start:start+50]
         filt="in.("+",".join(batch)+")"
         listings=_get_json(base,key,"listings",{
-            "select":"pvp_id,latitudine,longitudine,maps_link,geocode_status",
+            "select":"pvp_id,latitudine,longitudine,maps_link,geocode_precision",
             "pvp_id":filt,
         })
         for row in listings:
             pid=str(row.get("pvp_id") or "")
             seen_listings.add(pid)
+            exp=expected_primary.get(pid) or {}
+            try:
+                same_coords=(
+                    abs(float(row.get("latitudine"))-float(exp["latitudine"])) < 1e-8
+                    and abs(float(row.get("longitudine"))-float(exp["longitudine"])) < 1e-8
+                )
+            except (TypeError,ValueError,KeyError):
+                same_coords=False
             if (
-                row.get("latitudine") is None
-                or row.get("longitudine") is None
-                or not row.get("maps_link")
-                or str(row.get("geocode_status") or "").upper()!="DONE"
+                not same_coords
+                or row.get("maps_link") != exp.get("maps_link")
+                or str(row.get("geocode_precision") or "") != str(exp.get("geocode_precision") or "")
             ):
                 bad_parent_pins.add(pid)
 
         locations=_get_json(base,key,"listing_locations",{
-            "select":"pvp_id,is_primary",
+            "select":"pvp_id,is_primary,latitudine,longitudine,source,precision,status,formatted_address,resolution_reason",
             "pvp_id":filt,
         })
         for row in locations:
@@ -92,17 +114,35 @@ def _verify_imported_locations(plan):
             location_counts[pid]+=1
             if row.get("is_primary") is True:
                 primary_counts[pid]+=1
+                exp=(expected_primary.get(pid) or {}).get("location") or {}
+                try:
+                    same_coords=(
+                        abs(float(row.get("latitudine"))-float(exp.get("latitudine"))) < 1e-8
+                        and abs(float(row.get("longitudine"))-float(exp.get("longitudine"))) < 1e-8
+                    )
+                except (TypeError,ValueError):
+                    same_coords=False
+                if (
+                    not same_coords
+                    or str(row.get("source") or "") != str(exp.get("source") or "")
+                    or str(row.get("precision") or "") != str(exp.get("precision") or "")
+                    or str(row.get("status") or "") != "RESOLVED"
+                    or str(row.get("formatted_address") or "") != str(exp.get("formatted_address") or "")
+                    or str(row.get("resolution_reason") or "") != str(exp.get("resolution_reason") or "")
+                ):
+                    bad_primary_payload.add(pid)
 
     missing=sorted(set(ids)-seen_listings)
-    bad_locations=sorted(pid for pid in ids if location_counts[pid] != expected[pid])
+    bad_locations=sorted(pid for pid in ids if location_counts[pid] != expected_counts[pid])
     bad_primary=sorted(pid for pid in ids if primary_counts[pid] != 1)
-    if missing or bad_locations or bad_primary or bad_parent_pins:
+    if missing or bad_locations or bad_primary or bad_parent_pins or bad_primary_payload:
         raise RuntimeError(
             "Post-import verification failed: "
             f"missing_listings={missing[:10]} "
             f"bad_location_counts={bad_locations[:10]} "
             f"bad_primary_counts={bad_primary[:10]} "
-            f"bad_parent_pins={sorted(bad_parent_pins)[:10]}"
+            f"bad_parent_pins={sorted(bad_parent_pins)[:10]} "
+            f"bad_primary_payload={sorted(bad_primary_payload)[:10]}"
         )
     return {
         "status":"PASS",
@@ -110,6 +150,7 @@ def _verify_imported_locations(plan):
         "location_rows_verified":sum(location_counts.values()),
         "one_primary_per_listing":len(ids),
         "parent_pins_verified":len(ids),
+        "primary_location_payload_verified":len(ids),
     }
 
 def _write_delta_raw(source_path, dest_path, wanted_ids):
@@ -230,23 +271,43 @@ def _attach_primary_pins(plan):
                 "latitudine":float(pin["lat"]),
                 "longitudine":float(pin["lon"]),
                 "maps_link":pin_preview.maps_link(pin["lat"],pin["lon"]),
-                "geocode_status":"DONE",
-                "geocode_source":pin["source"],
                 "geocode_precision":pin["precision"],
-                "geocode_decision_reason":pin["reason"],
-                "geocode_formatted_address":pin["formatted_address"],
             })
-            rebuilt.append((row,subjects,attachments,locations))
+
+            published_locations=[]
+            for location in locations:
+                if location.get("is_primary") is not True:
+                    published_locations.append(location)
+                    continue
+                primary=dict(location)
+                warnings=list(primary.get("warnings") or [])
+                original_status=str(primary.get("status") or "")
+                if pin.get("fallback_from_status") is not None and original_status and original_status!="RESOLVED":
+                    marker="PUBLISHED_FALLBACK_FROM_"+original_status.upper()
+                    if marker not in warnings:
+                        warnings.append(marker)
+                primary.update({
+                    "latitudine":float(pin["lat"]),
+                    "longitudine":float(pin["lon"]),
+                    "source":pin["source"],
+                    "precision":pin["precision"],
+                    "status":"RESOLVED",
+                    "formatted_address":pin["formatted_address"],
+                    "resolution_reason":pin["reason"],
+                    "warnings":warnings,
+                })
+                published_locations.append(primary)
+
+            rebuilt.append((row,subjects,attachments,published_locations))
             pin_rows.append({
                 "pvp_id":str(row["pvp_id"]),
                 "latitudine":row["latitudine"],
                 "longitudine":row["longitudine"],
                 "maps_link":row["maps_link"],
-                "geocode_status":row["geocode_status"],
-                "geocode_source":row["geocode_source"],
                 "geocode_precision":row["geocode_precision"],
-                "geocode_decision_reason":row["geocode_decision_reason"],
-                "geocode_formatted_address":row["geocode_formatted_address"],
+                "source":pin["source"],
+                "resolution_reason":pin["reason"],
+                "formatted_address":pin["formatted_address"],
             })
     finally:
         ann.close()
