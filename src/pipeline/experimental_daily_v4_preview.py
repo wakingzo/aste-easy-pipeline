@@ -273,18 +273,23 @@ def _attach_primary_pins(plan):
 def main(argv=None):
     ap=argparse.ArgumentParser(description="Aste Easy experimental daily v4; preview by default, guarded apply optional")
     ap.add_argument("--apply",action="store_true")
+    ap.add_argument("--auto-apply",action="store_true",
+                    help="Build, freeze, validate and apply the same plan in one process; intended for scheduled runs")
     ap.add_argument("--expected-new",type=int)
     ap.add_argument("--expected-raw-sha256")
     ap.add_argument("--expected-pin-plan-sha")
     ap.add_argument("--page-size",type=int,default=200)
     ap.add_argument("--safety-days",type=int,default=2)
     args=ap.parse_args(argv)
+    if args.apply and args.auto_apply:
+        ap.error("--apply and --auto-apply are mutually exclusive")
     if not 10 <= args.page_size <= 500:
         ap.error("--page-size must be 10..500")
     if not 0 <= args.safety_days <= 14:
         ap.error("--safety-days must be 0..14")
 
     ensure_runtime_dirs()
+    do_apply=bool(args.apply or args.auto_apply)
     total=time.perf_counter()
 
     # Reuse the production discovery implementation only. It reads the DB threshold
@@ -312,7 +317,7 @@ def main(argv=None):
     if not eligible_ids:
         summary={
             "version":VERSION,
-            "mode":"APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
+            "mode":"AUTO_APPLY_GUARDED" if args.auto_apply else ("APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES"),
             "created_at":datetime.now().astimezone().isoformat(),
             "build_summary":build_summary,
             "raw_window_rows":preplan.get("incoming_unique"),
@@ -323,7 +328,7 @@ def main(argv=None):
             "google_calls":0,
             "timings_seconds":{**timings,"total":round(time.perf_counter()-total,3)},
         }
-        out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if args.apply else "experimental_daily_v4_preview.json")
+        out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if do_apply else "experimental_daily_v4_preview.json")
         out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
         print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
         print("[OUT]",out,flush=True)
@@ -382,14 +387,20 @@ def main(argv=None):
                 f"pin_plan_sha256={pin_plan['plan_sha256']}. "
                 "Run preview again and use these current authorization values."
             )
+    elif args.auto_apply:
+        # The plan is frozen in memory and will be passed unchanged to the importer.
+        # All exact payloads are rollback-validated by importer_v2 before its first write.
+        args.expected_new=len(plan["records"])
+        args.expected_raw_sha256=plan["raw_sha256"]
+        args.expected_pin_plan_sha=pin_plan["plan_sha256"]
     importer_summary=importer_v2.run(
-        apply=args.apply,
-        expected_new=args.expected_new if args.apply else None,
-        expected_sha=args.expected_raw_sha256 if args.apply else None,
+        apply=do_apply,
+        expected_new=args.expected_new if do_apply else None,
+        expected_sha=args.expected_raw_sha256 if do_apply else None,
         prebuilt_plan=plan,
     )
     post_verify=None
-    if args.apply:
+    if do_apply:
         t=time.perf_counter()
         post_verify=_verify_imported_locations(plan)
         timings["post_import_verify"]=round(time.perf_counter()-t,3)
@@ -400,7 +411,7 @@ def main(argv=None):
 
     summary={
         "version":VERSION,
-        "mode":"APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
+        "mode":"AUTO_APPLY_GUARDED" if args.auto_apply else ("APPLY_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES"),
         "created_at":datetime.now().astimezone().isoformat(),
         "build_summary":build_summary,
         "raw_window_rows":preplan.get("incoming_unique"),
@@ -419,14 +430,14 @@ def main(argv=None):
         "location_plan_sources":importer_summary.get("location_plan_sources"),
         "pin_plan":pin_plan,
         "raw_sha256":importer_summary.get("raw_sha256"),
-        "db_writes":importer_summary.get("inserted",0) if args.apply else 0,
+        "db_writes":importer_summary.get("inserted",0) if do_apply else 0,
         "inserted":importer_summary.get("inserted",0),
         "skipped_concurrent":importer_summary.get("skipped_concurrent",0),
         "post_import_verify":post_verify,
         "google_calls":0,
         "timings_seconds":timings,
     }
-    out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if args.apply else "experimental_daily_v4_preview.json")
+    out=Path(REPORTS_DIR)/("experimental_daily_v4_apply.json" if do_apply else "experimental_daily_v4_preview.json")
     out.write_text(json.dumps(summary,ensure_ascii=False,indent=2)+"\n",encoding="utf-8")
     print(json.dumps(summary,ensure_ascii=False,indent=2),flush=True)
     print("[OUT]",out,flush=True)
