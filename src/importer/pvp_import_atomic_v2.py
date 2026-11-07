@@ -91,8 +91,6 @@ def prepare_listing(preview_row, raw_object):
         row["pvp_geo_source"] = f"{kind}:{selected_index+1}/{n_beni}"
     else:
         row["pvp_geo_source"] = geo["source"] + ("_multi" if n_beni > 1 else "")
-    row["geocode_status"] = "PENDING"
-    row["geocode_input_hash"] = fingerprint(row)
     return row
 
 
