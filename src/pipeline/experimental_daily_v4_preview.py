@@ -55,6 +55,20 @@ def _get_json(base,key,path,params):
     with urlopen(req,timeout=120) as response:
         return json.loads(response.read().decode("utf-8") or "[]")
 
+def _parent_map_precision(technical_precision):
+    """Map rich technical precision to the four user-facing map classes."""
+    precision=str(technical_precision or "").strip().upper()
+    mapping={
+        "CIVICO":"PRECISA",
+        "PVP_COORD":"APPROSSIMATIVA",
+        "STRADA":"APPROSSIMATIVA",
+        "LOCALITA":"INDICATIVA",
+        "COMUNE":"INDICATIVA",
+    }
+    if precision not in mapping:
+        raise RuntimeError(f"Unsupported published technical precision for parent projection: {precision or '<blank>'}")
+    return mapping[precision]
+
 def _verify_imported_locations(plan):
     base=os.environ["SUPABASE_URL"].rstrip("/")
     key=os.environ["SUPABASE_SERVICE_ROLE"]
@@ -271,7 +285,7 @@ def _attach_primary_pins(plan):
                 "latitudine":float(pin["lat"]),
                 "longitudine":float(pin["lon"]),
                 "maps_link":pin_preview.maps_link(pin["lat"],pin["lon"]),
-                "geocode_precision":pin["precision"],
+                "geocode_precision":_parent_map_precision(pin["precision"]),
             })
 
             published_locations=[]
