@@ -52,6 +52,38 @@ group by 1
 order by 1;
 
 -- Sample rows for inspection.
+with null_parent as (
+    select
+        l.listing_id,
+        l.pvp_id,
+        l.comune,
+        l.provincia,
+        l.indirizzo,
+        l.latitudine,
+        l.longitudine,
+        l.maps_link
+    from public.listings l
+    where l.geocode_precision is null
+),
+loc_stats as (
+    select
+        ll.listing_id,
+        count(*) as location_rows,
+        count(*) filter (where ll.is_primary) as primary_rows,
+        count(*) filter (
+            where nullif(trim(coalesce(ll.comune_pvp,'')),'') is not null
+        ) as rows_with_comune_pvp,
+        count(*) filter (
+            where ll.latitudine is not null and ll.longitudine is not null
+        ) as rows_with_coords,
+        max(ll.status) filter (where ll.is_primary) as primary_status,
+        max(ll.source) filter (where ll.is_primary) as primary_source,
+        max(ll.precision) filter (where ll.is_primary) as primary_precision,
+        max(ll.comune_pvp) filter (where ll.is_primary) as primary_comune_pvp,
+        max(ll.address_raw) filter (where ll.is_primary) as primary_address_raw
+    from public.listing_locations ll
+    group by ll.listing_id
+)
 select
     np.pvp_id,
     np.comune as parent_comune,
