@@ -377,7 +377,10 @@ def main(argv=None):
         ):
             raise RuntimeError(
                 "APPLY AUTHORIZATION MISMATCH: current import/pin plan differs from preview; zero writes. "
-                "Run preview again and use eligible_new + raw_sha256 + pin_plan.plan_sha256."
+                f"CURRENT eligible_new={len(plan['records'])} "
+                f"raw_sha256={plan['raw_sha256']} "
+                f"pin_plan_sha256={pin_plan['plan_sha256']}. "
+                "Run preview again and use these current authorization values."
             )
     importer_summary=importer_v2.run(
         apply=args.apply,
