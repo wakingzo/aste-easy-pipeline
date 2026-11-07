@@ -142,6 +142,8 @@ def _attach_primary_pins(plan):
     sources=Counter()
     precisions=Counter()
     boundary_counts=Counter()
+    boundary_fallback_ids=[]
+    pvp_outside_ids=[]
     pin_rows=[]
     rebuilt=[]
     try:
@@ -173,6 +175,7 @@ def _attach_primary_pins(plan):
                     "formatted_address":"Comune di "+str(listing.get("comune") or ""),
                     "fallback_from_status":"BOUNDARY_COMUNE",
                 }
+                boundary_fallback_ids.append(str(listing.get("pvp_id")))
 
             if pin.get("source")=="PVP" and pin.get("precision")=="PVP_COORD":
                 check=boundary.test(
@@ -186,6 +189,8 @@ def _attach_primary_pins(plan):
                 )
                 position=str(check.get("position") or "UNKNOWN")
                 boundary_counts[position]+=1
+                if position=="OUTSIDE":
+                    pvp_outside_ids.append(str(listing.get("pvp_id")))
                 if check.get("safe"):
                     pin=dict(pin)
                     pin["reason"]="Coordinate fornite dal bene PVP e validate territorialmente nel confine comunale ISTAT 2026 ("+position+")."
@@ -211,6 +216,7 @@ def _attach_primary_pins(plan):
                             "formatted_address":"Comune di "+str(listing.get("comune") or ""),
                             "fallback_from_status":"BOUNDARY_COMUNE",
                         }
+                        boundary_fallback_ids.append(str(listing.get("pvp_id")))
                     pin=fallback
                     pin["reason"] += " Coordinate PVP scartate dal controllo territoriale ISTAT 2026 ("+position+")."
 
@@ -258,6 +264,8 @@ def _attach_primary_pins(plan):
         "sources":dict(sources),
         "precisions":dict(precisions),
         "pvp_boundary_validation":dict(boundary_counts),
+        "pvp_outside_ids":sorted(set(pvp_outside_ids),key=lambda x:int(x)),
+        "boundary_fallback_ids":sorted(set(boundary_fallback_ids),key=lambda x:int(x)),
         "plan_sha256":pin_sha,
         "google_calls":0,
     }
