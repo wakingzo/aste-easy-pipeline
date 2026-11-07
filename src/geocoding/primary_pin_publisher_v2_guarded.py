@@ -141,7 +141,24 @@ def build_plan(base,key,target_ids=None):
             pid=str(row["pvp_id"]); loc=by_pid[pid]
             pin,reason=preview.choose_pin(loc,ann,istat,cache)
             if pin is None:
-                raise RuntimeError(f"NO_SAFE_PIN pvp_id={pid} reason={reason}")
+                rep=boundary.representative_point({
+                    "comune":row.get("comune"),
+                    "provincia":row.get("provincia"),
+                    "sigla_provincia":row.get("sigla_provincia"),
+                    "regione":row.get("regione"),
+                })
+                if not rep.get("ok"):
+                    raise RuntimeError(
+                        f"NO_SAFE_PIN pvp_id={pid} reason={reason} boundary_fallback={rep.get('reason')}"
+                    )
+                pin={
+                    "lat":rep["lat"],"lon":rep["lon"],
+                    "source":"istat_boundary_comune_indicativo",
+                    "precision":"COMUNE",
+                    "reason":"Punto rappresentativo verificato all'interno del confine comunale ISTAT 2026; non rappresenta la posizione esatta dell'immobile.",
+                    "formatted_address":"Comune di "+str(row.get("comune") or ""),
+                    "fallback_from_status":"BOUNDARY_COMUNE",
+                }
 
             if pin.get("source")=="PVP" and pin.get("precision")=="PVP_COORD":
                 check=boundary.test(
@@ -162,10 +179,25 @@ def build_plan(base,key,target_ids=None):
                 else:
                     fallback,fallback_reason=preview.municipality_fallback(loc,ann,istat,cache)
                     if fallback is None:
-                        raise RuntimeError(
-                            f"PVP_COORD_NOT_TERRITORIALLY_SAFE pvp_id={pid} position={position} "
-                            f"and municipality fallback unavailable: {fallback_reason}"
-                        )
+                        rep=boundary.representative_point({
+                            "comune":row.get("comune"),
+                            "provincia":row.get("provincia"),
+                            "sigla_provincia":row.get("sigla_provincia"),
+                            "regione":row.get("regione"),
+                        })
+                        if not rep.get("ok"):
+                            raise RuntimeError(
+                                f"PVP_COORD_NOT_TERRITORIALLY_SAFE pvp_id={pid} position={position} "
+                                f"fallback={fallback_reason} boundary_fallback={rep.get('reason')}"
+                            )
+                        fallback={
+                            "lat":rep["lat"],"lon":rep["lon"],
+                            "source":"istat_boundary_comune_indicativo",
+                            "precision":"COMUNE",
+                            "reason":"Punto rappresentativo verificato all'interno del confine comunale ISTAT 2026; non rappresenta la posizione esatta dell'immobile.",
+                            "formatted_address":"Comune di "+str(row.get("comune") or ""),
+                            "fallback_from_status":"BOUNDARY_COMUNE",
+                        }
                     pin=fallback
                     pin["reason"] += " Coordinate PVP scartate dal controllo territoriale ISTAT 2026 ("+position+")."
 
