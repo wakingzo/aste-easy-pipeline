@@ -74,8 +74,6 @@ def prepare_listing(preview_row, raw_object):
     # The preview's text/geography is the source of truth; raw PVP coordinates
     # are separate. Coordinates and Maps link are not published until checked.
     row["pvp_id"] = str(preview_row["pvp_id"])
-    row["pvp_latitudine"] = geo["latitudine"]
-    row["pvp_longitudine"] = geo["longitudine"]
     detail = raw_object.get("detail_body") or {}
     beni = list(detail.get("beni") or []) + list((detail.get("lotto") or {}).get("beni") or [])
     n_beni = len(beni)
@@ -88,9 +86,9 @@ def prepare_listing(preview_row, raw_object):
         if selected_index is None:
             raise ValueError("Selected geographic bene not found")
         kind = "bene_multi" if n_beni > 1 else "bene"
-        row["pvp_geo_source"] = f"{kind}:{selected_index+1}/{n_beni}"
+        _ = f"{kind}:{selected_index+1}/{n_beni}"
     else:
-        row["pvp_geo_source"] = geo["source"] + ("_multi" if n_beni > 1 else "")
+        _ = geo["source"] + ("_multi" if n_beni > 1 else "")
     return row
 
 
