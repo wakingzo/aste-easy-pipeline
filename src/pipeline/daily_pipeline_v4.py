@@ -28,11 +28,11 @@ import istat_boundary_runtime_v11_6 as boundary_runtime
 VERSION="daily_pipeline_v4"
 RAW=Path(RAW_DIR)/"listings_api_raw.jsonl"
 DELTA_RAW=Path(RAW_DIR)/"listings_api_raw_delta_v4.jsonl"
-RESOLVER=Path(REPORTS_DIR)/"experimental_address_resolver_v1.jsonl"
-ANNCSU=Path(REPORTS_DIR)/"experimental_anncsu_match_v1.jsonl"
-LOCALITY=Path(REPORTS_DIR)/"experimental_locality_match_v1.jsonl"
-UNIFIED=Path(REPORTS_DIR)/"experimental_unified_offline_v1.jsonl"
-LOCATIONS=Path(REPORTS_DIR)/"experimental_listing_locations_preview_v1.jsonl"
+RESOLVER=Path(REPORTS_DIR)/"address_resolver_v1.jsonl"
+ANNCSU=Path(REPORTS_DIR)/"anncsu_match_v1.jsonl"
+LOCALITY=Path(REPORTS_DIR)/"locality_match_v1.jsonl"
+UNIFIED=Path(REPORTS_DIR)/"unified_offline_v1.jsonl"
+LOCATIONS=Path(REPORTS_DIR)/"listing_locations_materializer_v1.jsonl"
 
 def _run(label,args):
     print(f"[DAILY V4] {label}",flush=True)
@@ -410,19 +410,19 @@ def main(argv=None):
         return 0
 
     timings["resolver"]=_run("address resolver DELTA",[
-        SRC/"geocoding"/"experimental_address_resolver_v1.py",DELTA_RAW
+        SRC/"geocoding"/"address_resolver_v1.py",DELTA_RAW
     ])
     timings["anncsu"]=_run("ANNCSU matcher",[
-        SRC/"geocoding"/"experimental_anncsu_match_v1.py",RESOLVER
+        SRC/"geocoding"/"anncsu_match_v1.py",RESOLVER
     ])
     timings["locality"]=_run("ISTAT locality matcher",[
-        SRC/"geocoding"/"experimental_locality_match_v1.py",RESOLVER
+        SRC/"geocoding"/"locality_match_v1.py",RESOLVER
     ])
     timings["unified"]=_run("unified offline ranker",[
-        SRC/"geocoding"/"experimental_unified_offline_v1.py",RESOLVER,ANNCSU,LOCALITY
+        SRC/"geocoding"/"unified_offline_v1.py",RESOLVER,ANNCSU,LOCALITY
     ])
-    timings["location_preview"]=_run("listing_locations materialization preview",[
-        SRC/"importer"/"experimental_listing_locations_preview_v1.py",RESOLVER,UNIFIED
+    timings["location_preview"]=_run("listing_locations materializer",[
+        SRC/"importer"/"listing_locations_materializer_v1.py",RESOLVER,UNIFIED
     ])
 
     # Reuse the already authorized preplan and only replace its location payload
@@ -438,7 +438,7 @@ def main(argv=None):
     plan=dict(preplan)
     plan["records"]=rebuilt_records
     plan["locations"]=sum(len(r[3]) for r in rebuilt_records)
-    plan["location_plan_sources"]={"EXPERIMENTAL_PREVIEW":len(rebuilt_records)}
+    plan["location_plan_sources"]={"RESOLVER_MATERIALIZED":len(rebuilt_records)}
     timings["attach_locations"]=round(0.0,3)
 
     t=time.perf_counter()
@@ -481,8 +481,8 @@ def main(argv=None):
         timings["post_import_verify"]=round(time.perf_counter()-t,3)
     timings["total"]=round(time.perf_counter()-total,3)
 
-    location_stats=_read_json(Path(REPORTS_DIR)/"experimental_listing_locations_preview_v1_stats.json")
-    unified_stats=_read_json(Path(REPORTS_DIR)/"experimental_unified_offline_v1_stats.json")
+    location_stats=_read_json(Path(REPORTS_DIR)/"listing_locations_materializer_v1_stats.json")
+    unified_stats=_read_json(Path(REPORTS_DIR)/"unified_offline_v1_stats.json")
 
     summary={
         "version":VERSION,
