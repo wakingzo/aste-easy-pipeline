@@ -91,7 +91,7 @@ def build_rows(resolver,unified):
                     "warnings":warnings,
                     "resolution_reason":clean(final.get("reason")),
                     "anncsu_status":clean(((uni.get("evidence") or {}).get("anncsu_status"))),
-                    "resolver_version":"experimental_unified_offline_v1",
+                    "resolver_version":"unified_offline_v1",
                 })
 
             if not valid_pair(row["pvp_latitudine"],row["pvp_longitudine"]):
