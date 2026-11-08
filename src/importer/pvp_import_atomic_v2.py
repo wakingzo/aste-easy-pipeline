@@ -45,7 +45,7 @@ SUBJECT_COLS = frozenset((
     "email", "telefono", "sort_order"
 ))
 ATTACH_COLS = frozenset(("pvp_id", "filename", "resource_url", "mime", "size_bytes", "seen_at"))
-LOCATION_PREVIEW = REPORTS_DIR / "experimental_listing_locations_preview_v1.jsonl"
+LOCATION_PREVIEW = REPORTS_DIR / "listing_locations_materializer_v1.jsonl"
 LOCATION_COLS = frozenset((
     "pvp_id", "bene_index", "is_primary",
     "address_raw", "comune_pvp", "provincia_pvp", "sigla_provincia_pvp",
@@ -117,7 +117,7 @@ def prepare_children(pvp_id, subjects, attachments):
 
 def load_location_preview(path=LOCATION_PREVIEW):
     # Optional enrichment: the daily importer must not depend on a stale/offline
-    # experimental report in order to create the mandatory child location row.
+    # resolver materialization report in order to create the mandatory child location row.
     if not path.is_file():
         return defaultdict(list)
     out = defaultdict(list)
@@ -157,8 +157,8 @@ def fallback_primary_location(preview_row):
     """Create the minimum primary child row directly from the new listing payload.
 
     This is deliberately conservative and self-contained: it guarantees that every
-    newly inserted listing has a listing_locations child even when the experimental
-    resolver report has not yet been regenerated for today's RAW. Later resolver
+    newly inserted listing has a listing_locations child even when the resolver
+    materialization report has not yet been regenerated for today's RAW. Later resolver
     passes may enrich/replace this evidence.
     """
     pid = str(preview_row["pvp_id"])
@@ -428,7 +428,7 @@ def build_plan():
         ss, aa = prepare_children(pid, sub_by_id[pid], att_by_id[pid])
         locations = location_by_id.get(pid) or []
         if locations:
-            location_plan_sources["EXPERIMENTAL_PREVIEW"] += 1
+            location_plan_sources["RESOLVER_MATERIALIZED"] += 1
         else:
             locations = fallback_primary_location(row)
             location_plan_sources["DAILY_FALLBACK_PRIMARY"] += 1
