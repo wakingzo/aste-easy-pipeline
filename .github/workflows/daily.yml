@@ -3,7 +3,7 @@ name: Aste Easy daily update
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 3 * * *"
+    - cron: "43 2 * * *"
       timezone: "Europe/Rome"
 
 permissions:
