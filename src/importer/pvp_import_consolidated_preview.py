@@ -445,52 +445,52 @@ TIPOLOGIA_SEPARATOR = " | "
 
 TIPOLOGIA_RULES = [
     ("Villa/Villino", [
-        r"\\babitazione\\s+in\\s+villini\\b",
-        r"\\babitazione\\s+in\\s+ville\\b",
-        r"\\bvillin(?:o|i)\\b",
-        r"\\bvill(?:a|e)\\b",
+        r"\babitazione\s+in\s+villini\b",
+        r"\babitazione\s+in\s+ville\b",
+        r"\bvillin(?:o|i)\b",
+        r"\bvill(?:a|e)\b",
     ]),
     ("Abitazione", [
-        r"\\bappartament",
-        r"\\babitazion",
-        r"\\balloggio",
+        r"\bappartament",
+        r"\babitazion",
+        r"\balloggio",
     ]),
     ("Garage/Autorimessa", [
-        r"\\bgarage\\b",
-        r"\\bautorimess",
-        r"\\bbox\\b",
+        r"\bgarage\b",
+        r"\bautorimess",
+        r"\bbox\b",
     ]),
     ("Magazzino/Deposito", [
-        r"\\bmagazzin",
-        r"\\bdeposit",
+        r"\bmagazzin",
+        r"\bdeposit",
     ]),
     ("Terreno", [
-        r"\\bterren",
+        r"\bterren",
     ]),
     ("Negozio/Locale commerciale", [
-        r"\\bnegozi",
-        r"\\blocale\\s+commerciale",
-        r"\\battivit[aà]\\s+commerciale",
-        r"\\bcommercio\\s+al\\s+dettaglio",
-        r"\\bfabbricat[oi]\\s+commercial",
+        r"\bnegozi",
+        r"\blocale\s+commerciale",
+        r"\battivit[aà]\s+commerciale",
+        r"\bcommercio\s+al\s+dettaglio",
+        r"\bfabbricat[oi]\s+commercial",
     ]),
     ("Ufficio", [
-        r"\\buffici",
-        r"\\bstudio\\s+privato",
+        r"\buffici",
+        r"\bstudio\s+privato",
     ]),
     ("Capannone/Industriale", [
-        r"\\bcapannon",
-        r"\\bfabbricat[oi]\\s+industrial",
-        r"\\bopific",
+        r"\bcapannon",
+        r"\bfabbricat[oi]\s+industrial",
+        r"\bopific",
     ]),
     ("Posto auto", [
-        r"\\bpost[oi]\\s+auto",
+        r"\bpost[oi]\s+auto",
     ]),
     ("Cantina", [
-        r"\\bcantin",
+        r"\bcantin",
     ]),
     ("Fabbricato rurale", [
-        r"\\bfabbricat[oi]\\s+rural",
+        r"\bfabbricat[oi]\s+rural",
     ]),
 ]
 
@@ -514,7 +514,7 @@ def _candidate_values(value):
 
 
 def pick_tipologie(detail_body: dict, search_item: dict, fallback=""):
-    """Return every distinct normalized PVP bene type, preserving bene order.
+    """Return every distinct normalized PVP bene type in stable alphabetical order.
 
     Each bene contributes at most one semantic type. We prefer the descriptive
     type fields over category/code fallbacks so one bene does not produce
