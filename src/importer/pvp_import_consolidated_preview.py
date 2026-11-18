@@ -575,7 +575,7 @@ def pick_tipologie(detail_body: dict, search_item: dict, fallback=""):
         if normalized_fallback:
             out.append(normalized_fallback)
 
-    return TIPOLOGIA_SEPARATOR.join(out)
+    return TIPOLOGIA_SEPARATOR.join(sorted(out, key=str.casefold))
 
 
 def pick_tipologia(detail_body: dict, search_item: dict, fallback=""):
