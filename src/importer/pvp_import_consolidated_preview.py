@@ -441,19 +441,146 @@ def pick_categoria_immobile(detail_body: dict, search_item: dict, fallback=""):
     return fallback, "fallback"
 
 
-def pick_tipologia(detail_body: dict, search_item: dict, fallback=""):
+TIPOLOGIA_SEPARATOR = " | "
+
+TIPOLOGIA_RULES = [
+    ("Villa/Villino", [
+        r"\\babitazione\\s+in\\s+villini\\b",
+        r"\\babitazione\\s+in\\s+ville\\b",
+        r"\\bvillini?\\b",
+        r"\\bville?\\b",
+    ]),
+    ("Abitazione", [
+        r"\\bappartament",
+        r"\\babitazion",
+        r"\\balloggio",
+    ]),
+    ("Garage/Autorimessa", [
+        r"\\bgarage\\b",
+        r"\\bautorimess",
+        r"\\bbox\\b",
+    ]),
+    ("Magazzino/Deposito", [
+        r"\\bmagazzin",
+        r"\\bdeposit",
+    ]),
+    ("Terreno", [
+        r"\\bterren",
+    ]),
+    ("Negozio/Locale commerciale", [
+        r"\\bnegozi",
+        r"\\blocale\\s+commerciale",
+        r"\\battivit[aà]\\s+commerciale",
+        r"\\bcommercio\\s+al\\s+dettaglio",
+        r"\\bfabbricat[oi]\\s+commercial",
+    ]),
+    ("Ufficio", [
+        r"\\buffici",
+        r"\\bstudio\\s+privato",
+    ]),
+    ("Capannone/Industriale", [
+        r"\\bcapannon",
+        r"\\bfabbricat[oi]\\s+industrial",
+        r"\\bopific",
+    ]),
+    ("Posto auto", [
+        r"\\bpost[oi]\\s+auto",
+    ]),
+    ("Cantina", [
+        r"\\bcantin",
+    ]),
+    ("Fabbricato rurale", [
+        r"\\bfabbricat[oi]\\s+rural",
+    ]),
+]
+
+
+def normalize_tipologia_value(value) -> str:
+    s = prettify_api_category(value)
+    if not s:
+        return ""
+    for label, patterns in TIPOLOGIA_RULES:
+        if any(re.search(pattern, s, flags=re.I) for pattern in patterns):
+            return label
+    return s
+
+
+def _candidate_values(value):
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield item
+        return
+    yield value
+
+
+def pick_tipologie(detail_body: dict, search_item: dict, fallback=""):
+    """Return every distinct normalized PVP bene type, preserving bene order.
+
+    Each bene contributes at most one semantic type. We prefer the descriptive
+    type fields over category/code fallbacks so one bene does not produce
+    duplicate labels for the same asset.
+    """
     lotto = detail_body.get("lotto") or {}
     beni = (detail_body.get("beni") or []) + (lotto.get("beni") or [])
-    for b in beni:
-        for k in ("categoriaBene", "descCategoriaBene", "tipoBene", "descTipologiaBene", "tipologia", "codTipologiaBene"):
-            s = prettify_api_category(b.get(k))
-            if s:
-                return s
-    for k in ("categoriaBene", "descCategoriaBene", "tipoBene", "descTipologiaBene", "tipologia"):
-        s = prettify_api_category(search_item.get(k))
-        if s:
-            return s
-    return fallback
+    out = []
+    seen = set()
+
+    bene_keys = (
+        "descTipologiaBene",
+        "tipologia",
+        "tipoBene",
+        "descCategoriaBene",
+        "categoriaBene",
+        "codTipologiaBene",
+    )
+
+    for bene in beni:
+        if not isinstance(bene, dict):
+            continue
+        picked = ""
+        for key in bene_keys:
+            for candidate in _candidate_values(bene.get(key)):
+                picked = normalize_tipologia_value(candidate)
+                if picked:
+                    break
+            if picked:
+                break
+        if picked:
+            k = picked.casefold()
+            if k not in seen:
+                seen.add(k)
+                out.append(picked)
+
+    if not out:
+        search_keys = (
+            "descTipologiaBene",
+            "tipologia",
+            "tipoBene",
+            "descCategoriaBene",
+            "categoriaBene",
+            "codTipologiaBene",
+        )
+        for key in search_keys:
+            for candidate in _candidate_values(search_item.get(key)):
+                picked = normalize_tipologia_value(candidate)
+                if not picked:
+                    continue
+                k = picked.casefold()
+                if k not in seen:
+                    seen.add(k)
+                    out.append(picked)
+
+    if not out:
+        normalized_fallback = normalize_tipologia_value(fallback)
+        if normalized_fallback:
+            out.append(normalized_fallback)
+
+    return TIPOLOGIA_SEPARATOR.join(out)
+
+
+def pick_tipologia(detail_body: dict, search_item: dict, fallback=""):
+    """Backward-compatible alias: tipologia is now a normalized multi-value string."""
+    return pick_tipologie(detail_body, search_item, fallback)
 
 
 def pick_tipo_procedura(detail_body: dict, search_item: dict, fallback=""):
@@ -590,7 +717,7 @@ def derive_listing_row(obj, allegati_by_id):
             via_final = " ".join(x for x in [via_final, nc_final] if x).strip()
         if via_final or comune or cap:
             indirizzo = compose_indirizzo(via_final, cap, comune, sigla or provincia)
-    tipologia = pick_tipologia(detail_body, search_item, "")
+    tipologia = pick_tipologie(detail_body, search_item, "")
     categoria_immobile, categoria_immobile_reason = pick_categoria_immobile(detail_body, search_item, "")
     categoria_immobile = categoria_immobile or "altro"
     procedura = detail_body.get("procedura") or {}
