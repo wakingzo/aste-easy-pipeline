@@ -1,4 +1,12 @@
-from src.importer import pvp_import_consolidated_preview as importer
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(SRC / "importer"))
+
+import pvp_import_consolidated_preview as importer
 
 
 def test_collects_all_bene_tipologie_and_normalizes_synonyms():
