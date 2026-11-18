@@ -2,6 +2,16 @@ name: Aste Easy daily update
 
 on:
   workflow_dispatch:
+    inputs:
+      tipologia_backfill:
+        description: "Riconcilia le tipologie PVP già presenti nel DB"
+        required: false
+        default: "skip"
+        type: choice
+        options:
+          - skip
+          - preview
+          - apply
 
 permissions:
   contents: read
@@ -250,6 +260,20 @@ jobs:
           set -euo pipefail
           docker compose run --rm daily \
             python src/pipeline/daily_pipeline_v4.py --auto-apply
+
+      - name: Reconcile normalized multi-value tipologia
+        if: ${{ inputs.tipologia_backfill == 'preview' || inputs.tipologia_backfill == 'apply' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mode="${{ inputs.tipologia_backfill }}"
+          if [ "$mode" = "apply" ]; then
+            docker compose run --rm daily \
+              python src/importer/backfill_tipologia_multivalue_v1.py --apply
+          else
+            docker compose run --rm daily \
+              python src/importer/backfill_tipologia_multivalue_v1.py
+          fi
 
       - name: Collect reports created by this run
         if: always()
