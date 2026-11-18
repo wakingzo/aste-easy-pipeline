@@ -447,8 +447,8 @@ TIPOLOGIA_RULES = [
     ("Villa/Villino", [
         r"\\babitazione\\s+in\\s+villini\\b",
         r"\\babitazione\\s+in\\s+ville\\b",
-        r"\\bvillini?\\b",
-        r"\\bville?\\b",
+        r"\\bvillin(?:o|i)\\b",
+        r"\\bvill(?:a|e)\\b",
     ]),
     ("Abitazione", [
         r"\\bappartament",
