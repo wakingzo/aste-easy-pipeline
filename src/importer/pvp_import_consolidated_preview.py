@@ -445,13 +445,43 @@ TIPOLOGIA_SEPARATOR = " | "
 
 TIPOLOGIA_RULES = [
     ("Villa/Villino", [
+        r"\babitazione\s+(?:di\s+tipo\s+)?in\s+villini\b",
+        r"\babitazione\s+(?:di\s+tipo\s+)?in\s+ville\b",
         r"\babitazione\s+in\s+villini\b",
         r"\babitazione\s+in\s+ville\b",
         r"\bvillin(?:o|i)\b",
         r"\bvill(?:a|e)\b",
+        r"\ba\s*/\s*[78]\b",
+    ]),
+    ("Abitazione signorile", [
+        r"\babitazione\s+(?:di\s+)?tipo\s+signoril",
+        r"\babitazione\s+signoril",
+        r"\ba\s*/\s*1\b",
+    ]),
+    ("Abitazione civile", [
+        r"\babitazione\s+(?:di\s+)?tipo\s+civ(?:ile)?\b",
+        r"\babitazione\s+civile\b",
+        r"\ba\s*/\s*2\b",
+    ]),
+    ("Abitazione economica", [
+        r"\babitazione\s+(?:di\s+)?tipo\s+economic[ao]?\b",
+        r"\babitazione\s+economic[ao]\b",
+        r"\ba\s*/\s*3\b",
+    ]),
+    ("Abitazione popolare", [
+        r"\babitazione\s+(?:di\s+)?tipo\s+popolar",
+        r"\babitazione\s+popolar",
+        r"\ba\s*/\s*4\b",
+    ]),
+    ("Abitazione ultrapopolare", [
+        r"\babitazione\s+(?:di\s+)?tipo\s+ultrapopolar",
+        r"\babitazione\s+ultrapopolar",
+        r"\ba\s*/\s*5\b",
+    ]),
+    ("Appartamento", [
+        r"\bappartament",
     ]),
     ("Abitazione", [
-        r"\bappartament",
         r"\babitazion",
         r"\balloggio",
     ]),
@@ -477,6 +507,7 @@ TIPOLOGIA_RULES = [
     ("Ufficio", [
         r"\buffici",
         r"\bstudio\s+privato",
+        r"\ba\s*/\s*10\b",
     ]),
     ("Capannone/Industriale", [
         r"\bcapannon",
@@ -493,6 +524,7 @@ TIPOLOGIA_RULES = [
         r"\bfabbricat[oi]\s+rural",
     ]),
 ]
+
 
 
 def normalize_tipologia_value(value) -> str:
