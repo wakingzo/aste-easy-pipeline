@@ -182,7 +182,8 @@ def _parent_precision(technical_precision):
 
 
 def _safe_to_apply(*, input_source, technical_precision, original_status,
-                   location_count, has_conflict, old_pvp_inside, new_pin_safe):
+                   location_count, has_conflict, old_pvp_inside, new_pin_safe,
+                   admin_matches=True):
     """Rebaseline against RAW + current geocoder, NEVER old claimed precision.
 
     No synthetic RAW writes, no partial replacement of multi-bene records,
@@ -193,6 +194,10 @@ def _safe_to_apply(*, input_source, technical_precision, original_status,
         return False, "RAW_REQUIRED_BEFORE_APPLY"
     if location_count != 1:
         return False, "MULTI_BENE_NEEDS_PER_BENE_RESOLUTION"
+    if admin_matches is False:
+        return False, "RAW_SOURCE_COMUNE_CONFLICT"
+    if admin_matches is None:
+        return False, "RAW_SOURCE_COMUNE_UNRESOLVED"
     if not new_pin_safe:
         return False, "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
     tech = str(technical_precision or "").upper()
@@ -511,6 +516,9 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
             primary.get("pvp_longitudine"),
         )
     ) else False
+    admin_matches, admin_reason = pin_publisher.source_admin_matches_listing(
+        listing, primary, boundary
+    )
     safe, safe_reason = _safe_to_apply(
         input_source=input_source,
         technical_precision=pin.get("precision"),
@@ -519,6 +527,7 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         has_conflict="PVP_ANNCSU_CIVIC_CONFLICT" in (primary.get("warnings") or []),
         old_pvp_inside=pvp_safe,
         new_pin_safe=new_safe,
+        admin_matches=admin_matches,
     )
     movement = _haversine_m(
         listing.get("latitudine"),
@@ -566,6 +575,8 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         ),
         "safe_to_apply": safe,
         "safe_reason": safe_reason,
+        "raw_parent_admin_match": admin_matches,
+        "raw_parent_admin_reason": admin_reason,
         "locations": updated_locations,
     }
 
