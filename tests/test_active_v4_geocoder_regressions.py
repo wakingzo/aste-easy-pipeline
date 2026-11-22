@@ -453,3 +453,51 @@ def test_multibene_unmapped_stored_bene_index_is_blocked():
         assert "missing in RAW" in str(exc)
     else:
         assert False, "Expected unreconcilable secondary to be rejected"
+
+
+def test_backfill_post_apply_verifies_every_secondary_address_and_coordinate():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    expected = {
+        "pvp_id": "555", "new": {
+            "latitudine": 40., "longitudine": 9.,
+            "geocode_precision": "PRECISA",
+        },
+        "locations": [
+            {"pvp_id":"555","bene_index":0,"is_primary":True,
+             "latitudine":40.,"longitudine":9.,
+             "pvp_latitudine":40.,"pvp_longitudine":9.,
+             "address_raw":"Via Principale 1","comune_pvp":"Olbia",
+             "source":"ANNCSU","precision":"CIVICO",
+             "status":"RESOLVED","resolver_version":"unified_offline_v1"},
+            {"pvp_id":"555","bene_index":1,"is_primary":False,
+             "latitudine":None,"longitudine":None,
+             "pvp_latitudine":40.02,"pvp_longitudine":9.02,
+             "address_raw":"Via Secondaria 8","comune_pvp":"Olbia",
+             "source":None,"precision":None,
+             "status":"PENDING","resolver_version":"listing_locations_materializer_v1"},
+        ],
+    }
+    parent = {
+        "pvp_id":"555","latitudine":40.,"longitudine":9.,
+        "geocode_precision":"PRECISA",
+    }
+    secondaries = [dict(x) for x in expected["locations"]]
+    original_get = h._get
+    def patched_get(base, key, table, params):
+        if table == "listings":
+            return [parent]
+        if table == "listing_locations":
+            return secondaries
+        raise AssertionError("unexpected table")
+    try:
+        h._get = patched_get
+        assert h._verify_case("", "", expected) == (True, "PASS")
+        secondaries[1]["address_raw"] = "Via Persa 99"
+        good, why = h._verify_case("", "", expected)
+        assert not good and "address_raw mismatch bene_index=1" in why
+        secondaries[1]["address_raw"] = "Via Secondaria 8"
+        secondaries[1]["pvp_latitudine"] = 45.
+        good, why = h._verify_case("", "", expected)
+        assert not good and "pvp_coordinates mismatch bene_index=1" in why
+    finally:
+        h._get = original_get
