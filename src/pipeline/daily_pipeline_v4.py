@@ -24,6 +24,7 @@ import daily_pipeline_v3_18 as production_daily
 import pvp_import_atomic_v2 as importer_v2
 import primary_pin_publisher_v2_preview as pin_preview
 import istat_boundary_runtime_v11_6 as boundary_runtime
+import google_civic_arbitration_v1 as google_civic
 
 VERSION="daily_pipeline_v4"
 RAW=Path(RAW_DIR)/"listings_api_raw.jsonl"
@@ -188,10 +189,14 @@ def _write_delta_raw(source_path, dest_path, wanted_ids):
     tmp.replace(dest_path)
     return {"wanted_ids":len(wanted),"rows":rows}
 
-def _attach_primary_pins(plan):
+def _attach_primary_pins(plan, *, google_conflict_max_http=0, google_conflict_monthly_cap=9000):
     ann=pin_preview.open_anncsu_bbox()
     istat=pin_preview.open_istat_localities()
     boundary=boundary_runtime.BoundaryContext()
+    arbitrator=google_civic.ConflictArbitrator(
+        max_http=google_conflict_max_http,
+        monthly_cap=google_conflict_monthly_cap,
+    )
     cache={}
     actions=Counter()
     sources=Counter()
@@ -209,6 +214,10 @@ def _attach_primary_pins(plan):
                     f"PIN ATTACH requires exactly one primary location pvp_id={listing.get('pvp_id')} got={len(primaries)}"
                 )
             loc=primaries[0]
+            checked=arbitrator.resolve(loc,len(locations),listing,boundary)
+            if checked is not loc:
+                locations=[checked if x.get("is_primary") is True else x for x in locations]
+                loc=checked
             pin,reason=pin_preview.choose_pin(loc,ann,istat,cache)
             if pin is None:
                 rep=boundary.representative_point({
@@ -325,8 +334,11 @@ def _attach_primary_pins(plan):
                 "formatted_address":pin["formatted_address"],
             })
     finally:
-        ann.close()
-        istat.close()
+        try:
+            arbitrator.finish()
+        finally:
+            ann.close()
+            istat.close()
 
     pin_rows.sort(key=lambda x:int(x["pvp_id"]))
     canonical=json.dumps(pin_rows,ensure_ascii=False,sort_keys=True,separators=(",",":"))
@@ -343,7 +355,8 @@ def _attach_primary_pins(plan):
         "pvp_outside_ids":sorted(set(pvp_outside_ids),key=lambda x:int(x)),
         "boundary_fallback_ids":sorted(set(boundary_fallback_ids),key=lambda x:int(x)),
         "plan_sha256":pin_sha,
-        "google_calls":0,
+        "google_arbitration":arbitrator.summary(),
+        "google_calls":arbitrator.summary()["network_attempts"],
     }
 
 def main(argv=None):
@@ -356,6 +369,10 @@ def main(argv=None):
     ap.add_argument("--expected-pin-plan-sha")
     ap.add_argument("--page-size",type=int,default=200)
     ap.add_argument("--safety-days",type=int,default=2)
+    ap.add_argument("--google-conflict-max-http",type=int,default=0,
+                    help="0=offline (default); explicitly authorize at most 1..3 Google HTTP attempts for >1 km PVP/ANNCSU conflicts")
+    ap.add_argument("--google-conflict-monthly-cap",type=int,default=9000,
+                    help="Existing shared Google monthly ledger hard cap; never a separate quota")
     args=ap.parse_args(argv)
     if args.apply and args.auto_apply:
         ap.error("--apply and --auto-apply are mutually exclusive")
@@ -363,6 +380,10 @@ def main(argv=None):
         ap.error("--page-size must be 10..500")
     if not 0 <= args.safety_days <= 14:
         ap.error("--safety-days must be 0..14")
+    if not 0 <= args.google_conflict_max_http <= 3:
+        ap.error("--google-conflict-max-http must be 0..3")
+    if not 1 <= args.google_conflict_monthly_cap <= 9000:
+        ap.error("--google-conflict-monthly-cap must be 1..9000")
 
     ensure_runtime_dirs()
     do_apply=bool(args.apply or args.auto_apply)
@@ -443,7 +464,11 @@ def main(argv=None):
     timings["attach_locations"]=round(0.0,3)
 
     t=time.perf_counter()
-    plan,pin_plan=_attach_primary_pins(plan)
+    plan,pin_plan=_attach_primary_pins(
+        plan,
+        google_conflict_max_http=args.google_conflict_max_http,
+        google_conflict_monthly_cap=args.google_conflict_monthly_cap,
+    )
     timings["attach_primary_pins"]=round(time.perf_counter()-t,3)
 
     if args.apply:
@@ -510,7 +535,7 @@ def main(argv=None):
         "inserted":importer_summary.get("inserted",0),
         "skipped_concurrent":importer_summary.get("skipped_concurrent",0),
         "post_import_verify":post_verify,
-        "google_calls":0,
+        "google_calls":pin_plan["google_calls"],
         "timings_seconds":timings,
     }
     out=Path(REPORTS_DIR)/("daily_pipeline_v4_apply.json" if do_apply else "daily_pipeline_v4_preview.json")
