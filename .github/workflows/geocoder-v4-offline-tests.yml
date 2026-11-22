@@ -1,0 +1,40 @@
+name: Geocoder v4 offline regression tests
+
+on:
+  pull_request:
+    paths:
+      - "src/geocoding/unified_offline_v1.py"
+      - "src/geocoding/primary_pin_publisher_v2_preview.py"
+      - "src/pipeline/daily_pipeline_v4.py"
+      - "src/geocoding/historical_geocode_backfill_v2.py"
+      - "tests/test_active_v4_geocoder_regressions.py"
+      - ".github/workflows/geocoder-v4-offline-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pure-regressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out proposed source
+        uses: actions/checkout@v7
+      - name: Run offline geocoder guards without credentials or services
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import runpy
+
+          tests = runpy.run_path("tests/test_active_v4_geocoder_regressions.py")
+          count = 0
+          for name, fn in sorted(tests.items()):
+              if name.startswith("test_") and callable(fn):
+                  fn()
+                  print(f"[PASS] {name}")
+                  count += 1
+          if count != 6:
+              raise SystemExit(f"Expected six regression tests, got {count}")
+          print(f"PASS: {count} offline regression tests, no DB writes or Google calls")
+          PY
