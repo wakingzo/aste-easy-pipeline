@@ -712,6 +712,12 @@ def _patch_parent(base, key, listing_id, payload):
     return rows[0]
 
 
+def _coords_equal_or_both_missing(a_lat, a_lon, b_lat, b_lon):
+    if all(v is None for v in (a_lat, a_lon, b_lat, b_lon)):
+        return True
+    return _same_coord(a_lat, a_lon, b_lat, b_lon)
+
+
 def _verify_case(base, key, case):
     pid = str(case["pvp_id"])
     rows = _get(
@@ -739,29 +745,42 @@ def _verify_case(base, key, case):
         return False, "parent precision mismatch"
 
     locs = _get(
-        base,
-        key,
-        "listing_locations",
+        base, key, "listing_locations",
         {
-            "select": "pvp_id,is_primary,latitudine,longitudine,source,precision,status,resolver_version,bene_index",
+            "select": (
+                "pvp_id,bene_index,is_primary,address_raw,comune_pvp,"
+                "pvp_latitudine,pvp_longitudine,latitudine,longitudine,"
+                "source,precision,status,resolver_version"
+            ),
             "pvp_id": "eq." + pid,
             "order": "bene_index.asc",
-            "limit": "100",
+            "limit": "1000",
         },
     )
-    primaries = [x for x in locs if x.get("is_primary") is True]
-    if len(locs) != len(case["locations"]):
+    expected_locs = case["locations"]
+    if len(locs) != len(expected_locs):
         return False, "location count mismatch"
-    if len(primaries) != 1:
+    if sum(x.get("is_primary") is True for x in locs) != 1:
         return False, "primary location count mismatch"
-    primary = primaries[0]
-    if not _same_coord(
-        primary.get("latitudine"),
-        primary.get("longitudine"),
-        expected["latitudine"],
-        expected["longitudine"],
-    ):
-        return False, "primary location coordinates mismatch"
+    indexed = {x["bene_index"]: x for x in locs}
+    if len(indexed) != len(locs):
+        return False, "duplicate stored bene_index"
+    for planned in expected_locs:
+        idx = planned["bene_index"]
+        got = indexed.get(idx)
+        if got is None:
+            return False, f"missing secondary or primary bene_index={idx}"
+        if got.get("is_primary") is not planned.get("is_primary"):
+            return False, f"is_primary mismatch bene_index={idx}"
+        for field in ("address_raw", "comune_pvp", "source", "precision", "status", "resolver_version"):
+            if str(got.get(field) or "") != str(planned.get(field) or ""):
+                return False, f"{field} mismatch bene_index={idx}"
+        for prefix in ("", "pvp_"):
+            la, lo = prefix + "latitudine", prefix + "longitudine"
+            if not _coords_equal_or_both_missing(
+                got.get(la), got.get(lo), planned.get(la), planned.get(lo)
+            ):
+                return False, f"{prefix}coordinates mismatch bene_index={idx}"
     return True, "PASS"
 
 
@@ -781,6 +800,14 @@ def _apply_case(base, key, case):
     if len(old_parent_rows) != 1:
         raise RuntimeError("Unable to snapshot parent listing")
     old_parent = old_parent_rows[0]
+    # Basic compare-and-refuse: don't overwrite a parent already changed
+    # since the frozen plan was built.
+    planned_old = case["old"]
+    if not _coords_equal_or_both_missing(
+        old_parent.get("latitudine"), old_parent.get("longitudine"),
+        planned_old.get("latitudine"), planned_old.get("longitudine"),
+    ) or str(old_parent.get("geocode_precision") or "") != str(planned_old.get("geocode_precision") or ""):
+        raise RuntimeError("STALE_PARENT_DATA: parent changed since frozen plan")
     old_locations = _fetch_locations_snapshot(base, key, listing_id)
 
     new_locations = case["locations"]
@@ -789,10 +816,11 @@ def _apply_case(base, key, case):
     child_written = False
     parent_written = False
     try:
+        child_written = True  # A network response may fail AFTER commit.
         _replace_locations(base, key, pid, new_locations, validate=False)
-        child_written = True
 
         new = case["new"]
+        parent_written = True  # Roll back even if the response gets lost.
         _patch_parent(
             base,
             key,
@@ -804,7 +832,6 @@ def _apply_case(base, key, case):
                 "geocode_precision": new["geocode_precision"],
             },
         )
-        parent_written = True
 
         ok, reason = _verify_case(base, key, case)
         if not ok:
