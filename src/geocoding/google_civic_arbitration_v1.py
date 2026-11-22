@@ -199,6 +199,15 @@ class ConflictArbitrator:
         if not ok:
             return location
         self.counts["eligible_gt_1km"] += 1
+        # Do not spend a paid query when the source PVP physical municipality
+        # and the listing municipality themselves disagree.
+        import primary_pin_publisher_v2_preview as pin_preview
+        same_admin, admin_reason = pin_preview.source_admin_matches_listing(
+            listing, location, boundary
+        )
+        if same_admin is not True:
+            self.counts["source_admin_conflict_or_unresolved"] += 1
+            return location
         if self.max_http == 0:
             self.counts["disabled_no_google"] += 1
             return location
