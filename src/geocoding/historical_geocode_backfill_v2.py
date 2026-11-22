@@ -210,7 +210,7 @@ def _fetch_active_listings(base, key, explicit_ids):
     today = datetime.now().astimezone().date().isoformat()
     params = {
         "select": (
-            "listing_id,pvp_id,status,data_asta_date,created_at,regione,provincia,"
+            "listing_id,pvp_id,link_pvp,status,data_asta_date,created_at,regione,provincia,"
             "sigla_provincia,comune,cap,indirizzo,tipologia,latitudine,longitudine,maps_link,"
             "geocode_precision"
         ),
@@ -473,9 +473,12 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         parent_precision,
         pin.get("precision"),
     )
-    if input_source == "DB_SYNTHETIC" and str(pin.get("precision") or "").upper() not in {"CIVICO", "STRADA"}:
+    if input_source == "DB_SYNTHETIC":
+        # Synthetic input is useful for a fast read-only diagnosis, but it cannot
+        # prove the original PVP bene structure (multi-bene / multi-address).
+        # Never apply it: require the preserved historical RAW before writes.
         safe = False
-        safe_reason = "RAW_REQUIRED_FOR_AMBIGUOUS_DB_SYNTHETIC"
+        safe_reason = "RAW_REQUIRED_BEFORE_APPLY"
     movement = _haversine_m(
         listing.get("latitudine"),
         listing.get("longitudine"),
@@ -872,7 +875,7 @@ def main(argv=None):
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     suffix = "apply" if args.apply else "preview"
-    out = REPORTS_DIR / f"historical_geocode_backfill_v1_{suffix}.json"
+    out = REPORTS_DIR / f"historical_geocode_backfill_v2_{suffix}.json"
     out.write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
