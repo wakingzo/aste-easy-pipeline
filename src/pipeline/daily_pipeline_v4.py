@@ -204,6 +204,7 @@ def _attach_primary_pins(plan, *, google_conflict_max_http=0, google_conflict_mo
     boundary_counts=Counter()
     boundary_fallback_ids=[]
     pvp_outside_ids=[]
+    rejected_unsafe_pin_ids=[]
     pin_rows=[]
     rebuilt=[]
     try:
@@ -284,6 +285,12 @@ def _attach_primary_pins(plan, *, google_conflict_max_http=0, google_conflict_mo
                     pin=fallback
                     pin["reason"] += " Coordinate PVP scartate dal controllo territoriale ISTAT 2026 ("+position+")."
 
+            pin, territory_outcome = pin_preview.guard_pin_for_listing(
+                pin, listing, loc, boundary
+            )
+            if territory_outcome != "PASS":
+                rejected_unsafe_pin_ids.append(str(listing.get("pvp_id")))
+                boundary_fallback_ids.append(str(listing.get("pvp_id")))
             action="PUBLISH_RESOLVED" if pin["fallback_from_status"] is None else "PUBLISH_COMUNE_FALLBACK"
             actions[action]+=1
             sources[str(pin["source"])]+=1
@@ -305,6 +312,10 @@ def _attach_primary_pins(plan, *, google_conflict_max_http=0, google_conflict_mo
                 primary=dict(location)
                 warnings=list(primary.get("warnings") or [])
                 original_status=str(primary.get("status") or "")
+                if territory_outcome != "PASS":
+                    marker="PUBLISHED_TERRITORIAL_FALLBACK_"+territory_outcome
+                    if marker not in warnings:
+                        warnings.append(marker)
                 if pin.get("fallback_from_status") is not None and original_status and original_status!="RESOLVED":
                     marker="PUBLISHED_FALLBACK_FROM_"+original_status.upper()
                     if marker not in warnings:
@@ -353,6 +364,7 @@ def _attach_primary_pins(plan, *, google_conflict_max_http=0, google_conflict_mo
         "precisions":dict(precisions),
         "pvp_boundary_validation":dict(boundary_counts),
         "pvp_outside_ids":sorted(set(pvp_outside_ids),key=lambda x:int(x)),
+        "rejected_unsafe_pin_ids":sorted(set(rejected_unsafe_pin_ids),key=lambda x:int(x)),
         "boundary_fallback_ids":sorted(set(boundary_fallback_ids),key=lambda x:int(x)),
         "plan_sha256":pin_sha,
         "google_arbitration":arbitrator.summary(),
