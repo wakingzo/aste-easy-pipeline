@@ -48,7 +48,7 @@ def choose(res,ann,loc):
     d_ann_loc=hav(ann_lat,ann_lon,loc_lat,loc_lon) if ann_civic and loc_exact else None
 
     warnings=[]
-    if d_pvp_ann is not None and d_pvp_ann>250:
+    if d_pvp_ann is not None and d_pvp_ann>1000:
         warnings.append("PVP_ANNCSU_CIVIC_CONFLICT")
     if d_pvp_loc is not None and d_pvp_loc>6000:
         warnings.append("PVP_LOCALITY_CONFLICT")
@@ -69,7 +69,7 @@ def choose(res,ann,loc):
         if "PVP_ANNCSU_CIVIC_CONFLICT" in warnings:
             final["status"]="REVIEW"
             final["confidence"]="MEDIUM"
-            final["reason"]+=" Conflitto >250 m con coordinate PVP: richiede arbitraggio esterno."
+            final["reason"]+=" Conflitto >1 km con coordinate PVP: richiede arbitraggio esterno."
         if "ANNCSU_CIVIC_LOCALITY_CONFLICT" in warnings:
             final["status"]="REVIEW"
             final["confidence"]="MEDIUM"
