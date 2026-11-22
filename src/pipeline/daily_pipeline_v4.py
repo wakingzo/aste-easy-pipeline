@@ -305,6 +305,7 @@ def _attach_primary_pins(plan):
                     "longitudine":float(pin["lon"]),
                     "source":pin["source"],
                     "precision":pin["precision"],
+                    "confidence":pin_preview.published_confidence(pin, primary.get("confidence")),
                     "status":"RESOLVED",
                     "formatted_address":pin["formatted_address"],
                     "resolution_reason":pin["reason"],
