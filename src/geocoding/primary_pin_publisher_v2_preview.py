@@ -62,6 +62,13 @@ def valid_pair(lat,lon):
     la,lo=_f(lat),_f(lon)
     return la is not None and lo is not None and -90<=la<=90 and -180<=lo<=180 and not (la==0 and lo==0)
 
+def published_confidence(pin, original_confidence):
+    """A representative COMUNE pin is not evidence of a precise property location."""
+    if str((pin or {}).get("precision") or "").upper() == "COMUNE":
+        return "NONE"
+    return original_confidence
+
+
 def maps_link(lat,lon):
     return "https://www.google.com/maps?q="+quote(f"{float(lat):.8f},{float(lon):.8f}")
 
