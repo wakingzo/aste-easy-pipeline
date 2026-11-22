@@ -90,8 +90,27 @@ def open_istat_localities():
     con.row_factory=sqlite3.Row
     return con
 
+def _representative_locality(rows):
+    valid=[]
+    for row in rows:
+        if valid_pair(row["lat"],row["lon"]):
+            valid.append(row)
+    if not valid:
+        return None
+    lats=sorted(float(r["lat"]) for r in valid)
+    lons=sorted(float(r["lon"]) for r in valid)
+    mid=len(valid)//2
+    median_lat=lats[mid] if len(valid)%2 else (lats[mid-1]+lats[mid])/2.0
+    median_lon=lons[mid] if len(valid)%2 else (lons[mid-1]+lons[mid])/2.0
+    return min(valid,key=lambda r:(float(r["lat"])-median_lat)**2+(float(r["lon"])-median_lon)**2)
+
+
 def municipality_fallback(loc,ann_con,istat_con,cache):
     # Only physical-bene geography from listing_locations is allowed here.
+    #
+    # Prefer an actual ISTAT locality point inside the municipality over the
+    # geometric center of the ANNCSU access bbox. The latter can fall in rural
+    # or otherwise meaningless areas for geographically large municipalities.
     comune=str(loc.get("comune_pvp") or "").strip()
     code="".join(ch for ch in str(loc.get("codice_istat") or "") if ch.isdigit())
     code=code.zfill(6)[-6:] if code else ""
@@ -99,35 +118,53 @@ def municipality_fallback(loc,ann_con,istat_con,cache):
         return None, "MISSING_COMUNE_PVP"
     if not code:
         return None, "MISSING_CODICE_ISTAT"
+
     if code not in cache:
-        row=ann_con.execute(
-            "select min_lat,max_lat,min_lon,max_lon,count from municipality_bbox where codice_istat=?",
-            (code,)
-        ).fetchone()
-        if row:
+        target=norm_name(comune)
+
+        exact=list(istat_con.execute(
+            "select nome,lat,lon from localities where pro_com=? and nome_norm=?",
+            (code,target)
+        ))
+        rep=_representative_locality(exact)
+        if rep is not None:
             cache[code]={
-                "lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
-                "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
-                "source":"anncsu_comune_indicativo",
-                "reason":"Punto indicativo del Comune del bene fisico PVP, derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
+                "lat":float(rep["lat"]),
+                "lon":float(rep["lon"]),
+                "source":"istat_comune_indicativo",
+                "reason":"Punto indicativo del centro/località ISTAT omonima del Comune del bene fisico PVP; non rappresenta la posizione esatta dell'immobile.",
             }
         else:
-            target=norm_name(comune)
-            rows=list(istat_con.execute(
-                "select nome,lat,lon from localities where pro_com=? and nome_norm=?",
-                (code,target)
+            # If no locality bears exactly the municipality name, use an actual
+            # locality point nearest the median of all localities in the same
+            # municipality. This is still preferable to a raw bbox midpoint.
+            same_code=list(istat_con.execute(
+                "select nome,lat,lon from localities where pro_com=?",
+                (code,)
             ))
-            if len(rows)==1 and valid_pair(rows[0]["lat"],rows[0]["lon"]):
+            rep=_representative_locality(same_code)
+            if rep is not None:
                 cache[code]={
-                    "lat":float(rows[0]["lat"]),
-                    "lon":float(rows[0]["lon"]),
-                    "source":"istat_comune_indicativo",
-                    "reason":"Punto indicativo del Comune del bene fisico PVP, ricavato dalla località puntuale ISTAT omonima nello stesso codice comunale; non rappresenta la posizione esatta dell'immobile.",
+                    "lat":float(rep["lat"]),
+                    "lon":float(rep["lon"]),
+                    "source":"istat_comune_medoid_indicativo",
+                    "reason":"Punto indicativo ricavato da una località ISTAT rappresentativa interna al Comune del bene fisico PVP; non rappresenta la posizione esatta dell'immobile.",
                 }
-            elif len(rows)>1:
-                cache[code]={"error":"ISTAT_COMUNE_EXACT_AMBIGUOUS"}
             else:
-                cache[code]={"error":"ISTAT_COMUNE_EXACT_NOT_FOUND"}
+                row=ann_con.execute(
+                    "select min_lat,max_lat,min_lon,max_lon,count from municipality_bbox where codice_istat=?",
+                    (code,)
+                ).fetchone()
+                if row:
+                    cache[code]={
+                        "lat":(float(row["min_lat"])+float(row["max_lat"]))/2.0,
+                        "lon":(float(row["min_lon"])+float(row["max_lon"]))/2.0,
+                        "source":"anncsu_comune_indicativo",
+                        "reason":"Ultimo fallback: punto indicativo del Comune derivato dall'estensione degli accessi ANNCSU; non rappresenta la posizione esatta dell'immobile.",
+                    }
+                else:
+                    cache[code]={"error":"COMUNE_FALLBACK_NOT_FOUND"}
+
     rep=cache.get(code)
     if not rep:
         return None, "COMUNE_FALLBACK_NOT_FOUND"
