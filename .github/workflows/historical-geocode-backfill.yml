@@ -1,0 +1,215 @@
+name: Aste Easy historical geocode backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Modalità backfill"
+        required: true
+        default: "preview"
+        type: choice
+        options:
+          - preview
+          - apply
+      pvp_ids:
+        description: "PVP ID separati da virgola; lascia vuoto per tutte le aste attive legacy"
+        required: false
+        default: "4632047"
+        type: string
+      max_rows:
+        description: "Numero massimo di aste da processare (0 = tutte)"
+        required: true
+        default: "0"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aste-easy-historical-geocode-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      ANNCSU_CACHE_KEY: anncsu-sqlite-v1-20260915
+      ISTAT_BOUNDARY_CACHE_KEY: istat-boundaries-2026-v1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing repository secret: $name" >&2
+              exit 1
+            fi
+          done
+
+      - name: Syntax check backfill
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile             src/geocoding/historical_geocode_backfill_v1.py             src/geocoding/primary_pin_publisher_v2_preview.py
+
+      - name: Create ephemeral container env file
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          {
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
+            printf 'SUPABASE_SERVICE_ROLE=%s\n' "$SUPABASE_SERVICE_ROLE"
+          } > .env.container
+
+      - name: Restore ANNCSU runtime index
+        id: anncsu_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: data/anncsu/anncsu_runtime.sqlite3
+          key: ${{ env.ANNCSU_CACHE_KEY }}
+
+      - name: Bootstrap ANNCSU from private release seed
+        if: steps.anncsu_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/anncsu "$RUNNER_TEMP/anncsu-seed"
+          gh release download cloud-seed             --pattern 'anncsu_runtime.sqlite3.part*'             --dir "$RUNNER_TEMP/anncsu-seed"
+          shopt -s nullglob
+          parts=("$RUNNER_TEMP"/anncsu-seed/anncsu_runtime.sqlite3.part*)
+          if [ "${#parts[@]}" -lt 2 ]; then
+            echo "Expected at least two ANNCSU seed parts" >&2
+            exit 1
+          fi
+          cat "${parts[@]}" > data/anncsu/anncsu_runtime.sqlite3
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify ANNCSU runtime index
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import sqlite3
+          from pathlib import Path
+          p = Path('data/anncsu/anncsu_runtime.sqlite3')
+          expected_size = 2290520064
+          if not p.is_file():
+              raise SystemExit('ANNCSU SQLite missing')
+          if p.stat().st_size != expected_size:
+              raise SystemExit(f'ANNCSU size mismatch: {p.stat().st_size} != {expected_size}')
+          con = sqlite3.connect(f'file:{p.resolve()}?mode=ro', uri=True)
+          try:
+              qc = con.execute('PRAGMA quick_check').fetchone()[0]
+              ver = con.execute("SELECT value FROM meta WHERE key='version'").fetchone()[0]
+          finally:
+              con.close()
+          if qc != 'ok' or ver != 'anncsu_sqlite_index_v1':
+              raise SystemExit(f'ANNCSU verification failed: qc={qc} version={ver}')
+          print('ANNCSU PASS')
+          PY
+
+      - name: Restore ISTAT municipality boundaries
+        id: istat_boundary_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            data/reference/Limiti01012026.zip
+            data/reference/istat_confini_2026
+          key: ${{ env.ISTAT_BOUNDARY_CACHE_KEY }}
+
+      - name: Download and extract official ISTAT 2026 boundaries
+        if: steps.istat_boundary_restore.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p data/reference
+          curl -fL --retry 3 --retry-delay 5             -A 'AsteEasy-GitHubActions/1.0'             'https://www.istat.it/storage/cartografia/confini_amministrativi/non_generalizzati/2026/Limiti01012026.zip'             -o data/reference/Limiti01012026.zip
+          python - <<'PY'
+          from pathlib import Path
+          import shutil, zipfile
+          z = Path('data/reference/Limiti01012026.zip')
+          if not zipfile.is_zipfile(z):
+              raise SystemExit('ISTAT boundary download is not a valid ZIP')
+          out = Path('data/reference/istat_confini_2026')
+          shutil.rmtree(out, ignore_errors=True)
+          out.mkdir(parents=True)
+          with zipfile.ZipFile(z) as f:
+              f.extractall(out)
+          if not list(out.rglob('*.shp')):
+              raise SystemExit('No SHP found in ISTAT boundary archive')
+          print('ISTAT boundaries PASS')
+          PY
+
+      - name: Build production container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose build daily
+
+      - name: Run historical geocode backfill
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          PVP_IDS: ${{ inputs.pvp_ids }}
+          MAX_ROWS: ${{ inputs.max_rows }}
+        run: |
+          set -euo pipefail
+          args=(python src/geocoding/historical_geocode_backfill_v1.py --max-rows "$MAX_ROWS")
+          if [ "$MODE" = "apply" ]; then
+            args+=(--apply)
+          fi
+          if [ -n "${PVP_IDS//[[:space:]]/}" ]; then
+            args+=(--pvp-ids "$PVP_IDS")
+          fi
+          docker compose run --rm daily "${args[@]}"
+
+      - name: Upload backfill report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: historical-geocode-backfill-${{ github.run_id }}
+          path: runtime/reports/historical_geocode_backfill_v1_*.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 6
+
+      - name: Write run summary
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          files = sorted(
+              Path('runtime/reports').glob('historical_geocode_backfill_v1_*.json'),
+              key=lambda p: p.stat().st_mtime,
+              reverse=True,
+          )
+          if not files:
+              raise SystemExit(0)
+          obj = json.loads(files[0].read_text(encoding='utf-8-sig'))
+          counts = obj.get('counts') or {}
+          print('## Historical geocode backfill')
+          print()
+          print(f'- Mode: **{obj.get("mode")}**')
+          print(f'- Active future listings: **{obj.get("active_future_listings", 0)}**')
+          print(f'- Eligible candidates: **{obj.get("eligible_candidates", 0)}**')
+          print(f'- Already modern / skipped: **{obj.get("skipped_already_modern", 0)}**')
+          print(f'- Resolved: **{counts.get("resolved", 0)}**')
+          print(f'- Safe to apply: **{counts.get("safe_to_apply", 0)}**')
+          print(f'- Blocked downgrades: **{counts.get("blocked_downgrade", 0)}**')
+          print(f'- Applied: **{counts.get("applied", 0)}**')
+          print(f'- Errors: **{counts.get("errors", 0)}**')
+          PY
