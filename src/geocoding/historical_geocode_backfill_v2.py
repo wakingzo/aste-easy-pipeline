@@ -952,6 +952,9 @@ def main(argv=None):
         ]
     if args.max_rows:
         candidates = candidates[:args.max_rows]
+    raw_stats["selected_raw_batch"] = sum(
+        str(row["pvp_id"]) in raw_index for row in candidates
+    )
     print(
         f"[BACKFILL] active_future={len(all_active)} candidates={len(candidates)} "
         f"skipped_modern={skipped_modern} explicit={len(explicit_ids)} apply={int(args.apply)} "
