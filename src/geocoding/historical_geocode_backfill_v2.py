@@ -29,6 +29,7 @@ import unified_offline_v1 as unified_offline
 import listing_locations_materializer_v1 as materializer
 import primary_pin_publisher_v2_preview as pin_publisher
 import istat_boundary_runtime_v11_6 as boundary_runtime
+import google_civic_arbitration_v1 as google_civic
 
 VERSION = "historical_geocode_backfill_v2"
 PAGE = 1000
@@ -373,7 +374,7 @@ def _synthetic_raw_from_db(listing):
     }
 
 
-def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary):
+def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary, arbitrator=None):
     pid = str(listing["pvp_id"])
 
     resolved = address_resolver.process_row(raw)
@@ -393,6 +394,11 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
     if len(primaries) != 1:
         raise RuntimeError(f"Expected exactly one primary location; got {len(primaries)}")
     primary = primaries[0]
+    if arbitrator is not None and input_source == "RAW_PVP_HISTORICAL":
+        reviewed = arbitrator.resolve(primary, len(locations), listing, boundary)
+        if reviewed is not primary:
+            locations = [reviewed if r.get("is_primary") is True else r for r in locations]
+            primary = reviewed
 
     pin, no_pin_reason = pin_publisher.choose_pin(primary, pin_ann, pin_istat, pin_cache)
 
@@ -713,6 +719,10 @@ def main(argv=None):
         default=0,
         help="0 = all eligible candidates",
     )
+    ap.add_argument("--google-conflict-max-http", type=int, default=0,
+                    help="0=offline; explicitly authorize at most 1..3 Google requests in PREVIEW only for >1 km PVP/ANNCSU conflicts")
+    ap.add_argument("--google-conflict-monthly-cap", type=int, default=9000,
+                    help="Existing shared Google ledger hard cap (<=9000); never a new quota")
     ap.add_argument(
         "--raw-file",
         default=str(Path(RAW_DIR) / "listings_api_raw.jsonl"),
@@ -726,6 +736,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be >= 0")
+    if not 0 <= args.google_conflict_max_http <= 3:
+        ap.error("--google-conflict-max-http must be 0..3")
+    if not 1 <= args.google_conflict_monthly_cap <= 9000:
+        ap.error("--google-conflict-monthly-cap must be 1..9000")
+    if args.apply and args.google_conflict_max_http:
+        ap.error("Live Google cross-check is PREVIEW-only for historical backfill; zero apply writes")
     ensure_runtime_dirs()
     load_project_env(required=("SUPABASE_URL", "SUPABASE_SERVICE_ROLE"))
     base = os.environ["SUPABASE_URL"].rstrip("/")
@@ -760,6 +776,10 @@ def main(argv=None):
     pin_istat = pin_publisher.open_istat_localities()
     pin_cache = {}
     boundary = boundary_runtime.BoundaryContext()
+    arbitrator = google_civic.ConflictArbitrator(
+        max_http=args.google_conflict_max_http,
+        monthly_cap=args.google_conflict_monthly_cap,
+    )
 
     cases = []
     errors = []
@@ -788,6 +808,7 @@ def main(argv=None):
                     pin_istat,
                     pin_cache,
                     boundary,
+                    arbitrator=arbitrator,
                 )
                 cases.append(case)
                 counters["resolved"] += 1
@@ -832,10 +853,13 @@ def main(argv=None):
                 )
 
     finally:
-        ann_db.close()
-        loc_db.close()
-        pin_ann.close()
-        pin_istat.close()
+        try:
+            arbitrator.finish()
+        finally:
+            ann_db.close()
+            loc_db.close()
+            pin_ann.close()
+            pin_istat.close()
 
     canonical = [
         {
@@ -871,7 +895,8 @@ def main(argv=None):
         "errors": errors,
         "cases": cases,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
-        "google_calls": 0,
+        "google_arbitration": arbitrator.summary(),
+        "google_calls": arbitrator.summary()["network_attempts"],
     }
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
