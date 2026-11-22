@@ -199,3 +199,38 @@ def test_arbitration_rejects_any_outside_google_point():
     )
     assert got is None
     assert why == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def test_actual_google_core_parses_specific_rooftop_without_network():
+    # Exercise the real v9.3.6 address/civic/municipality score functions, not
+    # just fake predicates. Importing the core does not invoke an API request.
+    from src.geocoding import google_geocode_core_v9_3_6 as core
+    row = {"indirizzo": "Via Roma 40", "comune": "Olbia", "cap": "07026", "sigla_provincia": "SS"}
+    assert core.constrained_address_variants(row)[0] == "Via Roma 40"
+    assert core.expected_house_numbers(row) == {"40"}
+    result = {
+        "ok": True, "partial_match": False, "lat": 40.0002, "lon": 9.0,
+        "location_type": "ROOFTOP",
+        "formatted_address": "Via Roma, 40, 07026 Olbia SS, Italia",
+        "types": ["street_address"],
+        "components": [
+            {"long_name": "40", "short_name": "40", "types": ["street_number"]},
+            {"long_name": "Via Roma", "short_name": "Via Roma", "types": ["route"]},
+            {"long_name": "Olbia", "short_name": "Olbia", "types": ["locality"]},
+            {"long_name": "Sassari", "short_name": "SS", "types": ["administrative_area_level_2"]},
+            {"long_name": "07026", "short_name": "07026", "types": ["postal_code"]},
+            {"long_name": "Italia", "short_name": "IT", "types": ["country"]},
+        ],
+    }
+    assert core.municipality_geo_matches(row, result)
+    assert core.house_number_relation(core.expected_house_numbers(row), core.result_house_numbers(result)) == "exact"
+    got, reason = judge(_large_conflict(), {"comune": "Olbia"}, [result], core, _FakeBoundary())
+    assert reason == "ANNCSU_CONFIRMED"
+    assert got["source"] == "ANNCSU"
+    wrong_civic = {**result, "components": [
+        {"long_name": "41", "short_name": "41", "types": ["street_number"]},
+        *result["components"][1:],
+    ]}
+    bad, reason = judge(_large_conflict(), {"comune": "Olbia"}, [wrong_civic], core, _FakeBoundary())
+    assert bad is None
+    assert reason == "NO_STRICT_GOOGLE_AGREEMENT"
