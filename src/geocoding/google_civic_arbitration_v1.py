@@ -3,8 +3,10 @@
 
 A disagreement is not a reason to promote a result. Google is consulted only
 for a SINGLE physical bene with a structured CIVICO already matched by ANNCSU,
-a valid PVP coordinate, and >1 km between the two. Even a Google ROOFTOP is
-only corroborating evidence: the original ANNCSU or PVP coordinate is kept.
+a valid PVP coordinate, and >1 km between the two. A Google ROOFTOP close to
+either candidate is NOT independent proof that the real property is there:
+the civic/road can be ambiguous (e.g. Siracusa Via Elorina 117).
+The result is diagnostic only; NEVER change REVIEW to RESOLVED or move a pin.
 
 No Google API, cache or budget module is loaded until an explicitly enabled,
 eligible case is encountered. By default the entire module is offline.
@@ -135,34 +137,23 @@ def judge(loc, listing, results, core, boundary, *, proximity_m=CONFIRM_RADIUS_M
 
     side = next(iter(sides))
     matched_m = min(d for _, d in hits)
+    # A good Google hit is a useful clue, not an independent resolution
+    # when PVP and ANNCSU disagree by >1 km. Do not silently turn a
+    # plausible but wrong geocode into an apparently verified property.
     changed = deepcopy(loc)
-    if side == "ANNCSU":
-        changed.update(
-            status="RESOLVED", confidence="HIGH",
-            google_status="CIVIC_ARBITRATION_CONFIRMS_ANNCSU",
-            resolution_reason=(
-                "Civico ANNCSU confermato da Google ROOFTOP con strada, civico "
-                f"e comune coerenti (distanza {matched_m:.0f} m); PVP discordante."
-            ),
-        )
-    else:
-        changed.update(
-            latitudine=float(loc["pvp_latitudine"]),
-            longitudine=float(loc["pvp_longitudine"]),
-            source="PVP", precision="PVP_COORD",
-            status="RESOLVED", confidence="MEDIUM_HIGH",
-            google_status="CIVIC_ARBITRATION_CONFIRMS_PVP",
-            resolution_reason=(
-                "Coordinate PVP confermate da Google ROOFTOP con strada, civico "
-                f"e comune coerenti (distanza {matched_m:.0f} m); ANNCSU discordante."
-            ),
-        )
+    changed["google_status"] = "GOOGLE_NEAR_" + side + "_NOT_DECISIVE"
+    changed["status"] = "REVIEW"
+    changed["resolution_reason"] = (
+        f"Discordanza PVP/ANNCSU >1 km non risolta. Google ROOFTOP "
+        f"vicino a {side} ({matched_m:.0f} m), ma indirizzo/civico "
+        "potenzialmente ambiguo: non prova la posizione del bene."
+    )
     warnings = list(changed.get("warnings") or [])
-    tag = "GOOGLE_CIVIC_ARBITRATION_" + side
-    if tag not in warnings:
-        warnings.append(tag)
+    marker = "GOOGLE_NEAR_" + side + "_NOT_DECISIVE"
+    if marker not in warnings:
+        warnings.append(marker)
     changed["warnings"] = warnings
-    return changed, side + "_CONFIRMED"
+    return changed, side + "_NOT_DECISIVE"
 
 
 class ConflictArbitrator:
