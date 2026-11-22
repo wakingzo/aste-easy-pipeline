@@ -36,6 +36,7 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+      GOOGLE_GEOCODING_API_KEY: ${{ secrets.GOOGLE_GEOCODING_API_KEY }}
       ANNCSU_CACHE_KEY: anncsu-sqlite-v1-20260915
       ISTAT_BOUNDARY_CACHE_KEY: istat-boundaries-2026-v1
 
@@ -49,7 +50,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE; do
+          for name in SUPABASE_URL SUPABASE_SERVICE_ROLE GOOGLE_GEOCODING_API_KEY; do
             if [ -z "${!name:-}" ]; then
               echo "Missing repository secret: $name" >&2
               exit 1
@@ -70,6 +71,7 @@ jobs:
           {
             printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
             printf 'SUPABASE_SERVICE_ROLE=%s\n' "$SUPABASE_SERVICE_ROLE"
+            printf 'GOOGLE_GEOCODING_API_KEY=%s\n' "$GOOGLE_GEOCODING_API_KEY"
           } > .env.container
 
       - name: Restore ANNCSU runtime index
@@ -150,6 +152,69 @@ jobs:
           if not list(out.rglob('*.shp')):
               raise SystemExit('No SHP found in ISTAT boundary archive')
           print('ISTAT boundaries PASS')
+          PY
+
+      - name: Restore mutable Aste Easy state
+        id: runtime_restore
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            runtime/cache
+            runtime/state
+            runtime/reports
+          key: runtime-v318-backfill-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            runtime-v318-
+
+      - name: Bootstrap mutable state from private release seed
+        if: steps.runtime_restore.outputs.cache-matched-key == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/state-seed"
+          gh release download cloud-seed \
+            --pattern 'aste-easy-state-seed.zip' \
+            --dir "$RUNNER_TEMP/state-seed"
+          python - <<'PY'
+          import os
+          import pathlib
+          import shutil
+          import zipfile
+
+          zip_path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "state-seed" / "aste-easy-state-seed.zip"
+          with zipfile.ZipFile(zip_path) as zf:
+              for info in zf.infolist():
+                  name = info.filename.replace("\\", "/").lstrip("/")
+                  if not name:
+                      continue
+                  target = pathlib.Path(name)
+                  if info.is_dir() or name.endswith("/"):
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with zf.open(info) as src, open(target, "wb") as dst:
+                      shutil.copyfileobj(src, dst)
+          print("State seed extracted successfully.")
+          PY
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Verify persistent mutable state
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s runtime/cache/google_geocode_cache_v8.json
+          test -s runtime/cache/google_api_usage_v9_2.json
+          mkdir -p runtime/raw runtime/reports runtime/cache runtime/state runtime/handoff
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for p in [
+              Path('runtime/cache/google_geocode_cache_v8.json'),
+              Path('runtime/cache/google_api_usage_v9_2.json'),
+          ]:
+              json.loads(p.read_text(encoding='utf-8-sig'))
+          print('Mutable state PASS')
           PY
 
       - name: Build production container
