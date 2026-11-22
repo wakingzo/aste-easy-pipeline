@@ -283,9 +283,23 @@ def test_rebaseline_blocks_synthetic_without_original_raw():
     assert not ok and why == "RAW_REQUIRED_BEFORE_APPLY"
 
 
-def test_rebaseline_blocks_multi_bene_before_overwriting_secondary_locations():
+def test_rebaseline_allows_complete_multi_bene_without_extra_pins():
     ok, why = _eligible_rebaseline(location_count=2)
-    assert not ok and why == "MULTI_BENE_NEEDS_PER_BENE_RESOLUTION"
+    assert ok and why == "RAW_REBASELINE_CIVICO"
+
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    original = [
+        {"pvp_id":"1","bene_index":0,"is_primary":True,
+         "address_raw":"Via Roma 10","comune_pvp":"Roma","status":"RESOLVED"},
+        {"pvp_id":"1","bene_index":1,"is_primary":False,
+         "address_raw":"Via Milano 15","comune_pvp":"Roma","status":"PENDING"},
+    ]
+    merged = _merge_stored_secondary_locations(original, [])
+    assert len(merged)==2
+    assert sum(x["is_primary"] is True for x in merged)==1
+    assert merged[0]["address_raw"] == "Via Roma 10"
+    assert merged[1]["address_raw"] == "Via Milano 15"
+    assert merged[1]["status"] == "PENDING"
 
 
 def test_rebaseline_blocks_unresolved_pvp_anncsu_conflict_even_if_legacy_precise():
@@ -383,3 +397,59 @@ def test_siracusa_google_rooftop_near_pvp_is_not_proof_of_property():
     assert changed["latitudine"] == loc["latitudine"]
     assert changed["longitudine"] == loc["longitudine"]
     assert changed["google_status"] == "GOOGLE_NEAR_PVP_NOT_DECISIVE"
+
+
+def test_multibene_secondary_saved_raw_metadata_is_preserved_when_new_missing():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh = [
+        {"bene_index":0, "is_primary":True, "address_raw":"Via Nuova 1"},
+        {"bene_index":1, "is_primary":False, "address_raw":None,
+         "comune_pvp":"Roma", "pvp_latitudine":None, "pvp_longitudine":None,
+         "status":"PENDING", "warnings":[]},
+    ]
+    saved = [
+        {"bene_index":0,"is_primary":True, "address_raw":"Via Nuova 1"},
+        {"bene_index":1,"is_primary":False, "address_raw":"Via Conservata 3",
+         "pvp_latitudine":41.9, "pvp_longitudine":12.5,
+         "status":"PENDING"},
+    ]
+    new = _merge_stored_secondary_locations(fresh, saved)
+    assert new[1]["address_raw"] == "Via Conservata 3"
+    assert new[1]["pvp_latitudine"] == 41.9
+    assert new[1]["pvp_longitudine"] == 12.5
+    assert new[1]["status"] == "PENDING"
+    assert "HISTORICAL_SECONDARY_DATA_PRESERVED" in new[1]["warnings"]
+
+
+def test_multibene_existing_secondary_final_pin_is_not_erased():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh = [
+        {"bene_index":0, "is_primary":True},
+        {"bene_index":1, "is_primary":False, "address_raw":"Via Roma 4",
+         "comune_pvp":"Roma", "status":"PENDING", "warnings":[]},
+    ]
+    saved = [
+        {"bene_index":0,"is_primary":True},
+        {"bene_index":1,"is_primary":False, "address_raw":"Via Roma 4",
+         "comune_pvp":"Roma", "latitudine":41.89,"longitudine":12.49,
+         "source":"ANNCSU","precision":"CIVICO","confidence":"HIGH",
+         "status":"RESOLVED","warnings":["OLD_REVIEWED"]},
+    ]
+    new = _merge_stored_secondary_locations(fresh, saved)
+    assert new[1]["latitudine"] == 41.89
+    assert new[1]["source"] == "ANNCSU"
+    assert new[1]["status"] == "RESOLVED"
+    assert "OLD_REVIEWED" in new[1]["warnings"]
+
+
+def test_multibene_unmapped_stored_bene_index_is_blocked():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh=[{"bene_index":0,"is_primary":True}]
+    stored=[{"bene_index":0,"is_primary":True},
+            {"bene_index":9,"is_primary":False,"address_raw":"Unmapped"}]
+    try:
+        _merge_stored_secondary_locations(fresh, stored)
+    except RuntimeError as exc:
+        assert "missing in RAW" in str(exc)
+    else:
+        assert False, "Expected unreconcilable secondary to be rejected"
