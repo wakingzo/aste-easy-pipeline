@@ -350,3 +350,36 @@ def test_any_civic_outside_listing_municipality_is_downgraded():
 def test_raw_admin_conflict_cannot_be_applied_in_historical_rebaseline():
     ok, why = _eligible_rebaseline(admin_matches=False)
     assert not ok and why == "RAW_SOURCE_COMUNE_CONFLICT"
+
+
+def test_siracusa_google_rooftop_near_pvp_is_not_proof_of_property():
+    # Actual Via Elorina 117 case: Google near PVP, perizia elsewhere.
+    # No PDF processing in production: this is solely a regression example.
+    loc = {
+        **_large_conflict(),
+        "street": "Via Elorina", "civic": "117",
+        "comune_pvp": "Siracusa", "sigla_provincia_pvp": "SR",
+        "cap_pvp": "96100",
+        "pvp_latitudine": 37.0665861, "pvp_longitudine": 15.2823994,
+        "latitudine": 37.0235556, "longitudine": 15.2590278,
+    }
+    candidate = {**_google_result(37.066649), "lon": 15.2823994}
+
+    class SiracusaGoogle(_FakeGoogle):
+        @staticmethod
+        def expected_house_numbers(row):
+            assert row["indirizzo"] == "Via Elorina 117"
+            return {"117"}
+
+        @staticmethod
+        def result_house_numbers(result):
+            return {"117"}
+
+    changed, outcome = judge(
+        loc, {"comune": "Siracusa"}, [candidate], SiracusaGoogle(), _FakeBoundary()
+    )
+    assert outcome == "PVP_NOT_DECISIVE"
+    assert changed["status"] == "REVIEW"
+    assert changed["latitudine"] == loc["latitudine"]
+    assert changed["longitudine"] == loc["longitudine"]
+    assert changed["google_status"] == "GOOGLE_NEAR_PVP_NOT_DECISIVE"
