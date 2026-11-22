@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import sys
+import time
+from collections import Counter
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+HERE = Path(__file__).resolve().parent
+SRC = HERE.parent
+for p in (SRC, SRC / "geocoding", SRC / "importer", SRC / "pipeline"):
+    if str(p) not in sys.path:
+        sys.path.insert(0, str(p))
+
+from aste_paths import ANNCSU_DIR, DATA_DIR, RAW_DIR, REPORTS_DIR, ensure_runtime_dirs
+from project_env import load_project_env
+import address_resolver_v1 as address_resolver
+import anncsu_match_v1 as anncsu_match
+import locality_match_v1 as locality_match
+import unified_offline_v1 as unified_offline
+import listing_locations_materializer_v1 as materializer
+import primary_pin_publisher_v2_preview as pin_publisher
+import istat_boundary_runtime_v11_6 as boundary_runtime
+
+VERSION = "historical_geocode_backfill_v2"
+PAGE = 1000
+MODERN_RESOLVER = "unified_offline_v1"
+
+LOCATION_FIELDS = (
+    "pvp_id,bene_index,is_primary,address_raw,comune_pvp,provincia_pvp,"
+    "sigla_provincia_pvp,cap_pvp,codice_istat,pvp_latitudine,pvp_longitudine,"
+    "street,civic,internal,locality,snc,is_intersection,latitudine,longitudine,"
+    "source,precision,confidence,status,formatted_address,anncsu_status,"
+    "google_status,warnings,resolution_reason,resolver_version,checked_at"
+)
+
+PRECISION_RANK = {
+    "": 0,
+    "DA_VERIFICARE": 0,
+    "INDICATIVA": 1,
+    "APPROSSIMATIVA": 2,
+    "PRECISA": 3,
+}
+
+
+def _request_json(req):
+    with urlopen(req, timeout=120) as response:
+        return json.loads(response.read().decode("utf-8") or "null")
+
+
+def _get(base, key, path, params):
+    url = base.rstrip("/") + "/rest/v1/" + path + "?" + urlencode(params, safe="(),.*")
+    req = Request(
+        url,
+        method="GET",
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Accept": "application/json",
+        },
+    )
+    return _request_json(req)
+
+
+def _all(base, key, path, params):
+    out = []
+    offset = 0
+    while True:
+        p = dict(params)
+        p["limit"] = str(PAGE)
+        p["offset"] = str(offset)
+        rows = _get(base, key, path, p)
+        out.extend(rows)
+        if len(rows) < PAGE:
+            break
+        offset += len(rows)
+    return out
+
+
+def _rpc(base, key, name, payload):
+    url = base.rstrip("/") + "/rest/v1/rpc/" + name
+    req = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    return _request_json(req)
+
+
+def _patch(base, key, path, filters, payload):
+    url = base.rstrip("/") + "/rest/v1/" + path + "?" + urlencode(filters, safe="(),.*")
+    req = Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="PATCH",
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    return _request_json(req)
+
+
+def _delete(base, key, path, filters):
+    url = base.rstrip("/") + "/rest/v1/" + path + "?" + urlencode(filters, safe="(),.*")
+    req = Request(
+        url,
+        method="DELETE",
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Accept": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    return _request_json(req)
+
+
+def _f(value):
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        return None
+    return x if math.isfinite(x) else None
+
+
+def _same_coord(a_lat, a_lon, b_lat, b_lon, tol=1e-8):
+    vals = [_f(a_lat), _f(a_lon), _f(b_lat), _f(b_lon)]
+    if any(v is None for v in vals):
+        return False
+    return abs(vals[0] - vals[2]) < tol and abs(vals[1] - vals[3]) < tol
+
+
+def _haversine_m(a_lat, a_lon, b_lat, b_lon):
+    vals = [_f(a_lat), _f(a_lon), _f(b_lat), _f(b_lon)]
+    if any(v is None for v in vals):
+        return None
+    lat1, lon1, lat2, lon2 = vals
+    r = 6371008.8
+    p1 = math.radians(lat1)
+    p2 = math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    z = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(z)))
+
+
+def _maps_link(lat, lon):
+    return f"https://www.google.com/maps?q={float(lat):.8f},{float(lon):.8f}"
+
+
+def _parent_precision(technical_precision):
+    mapping = {
+        "CIVICO": "PRECISA",
+        "PVP_COORD": "APPROSSIMATIVA",
+        "STRADA": "APPROSSIMATIVA",
+        "LOCALITA": "INDICATIVA",
+        "COMUNE": "INDICATIVA",
+    }
+    value = str(technical_precision or "").strip().upper()
+    if value not in mapping:
+        raise RuntimeError(f"Unsupported technical precision: {value or '<blank>'}")
+    return mapping[value]
+
+
+def _safe_to_apply(old_precision, new_precision, technical_precision):
+    oldp = str(old_precision or "").strip().upper()
+    newp = str(new_precision or "").strip().upper()
+    tech = str(technical_precision or "").strip().upper()
+    if tech == "CIVICO":
+        return True, "NEW_CIVICO"
+    if PRECISION_RANK.get(newp, 0) >= PRECISION_RANK.get(oldp, 0):
+        return True, "NO_PRECISION_DOWNGRADE"
+    return False, f"WOULD_DOWNGRADE_{oldp or 'UNKNOWN'}_TO_{newp or 'UNKNOWN'}"
+
+
+def _parse_ids(raw):
+    out = []
+    seen = set()
+    for token in str(raw or "").replace(";", ",").split(","):
+        value = token.strip()
+        if not value:
+            continue
+        if not value.isdigit():
+            raise ValueError(f"Invalid pvp_id: {value}")
+        if value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _fetch_active_listings(base, key, explicit_ids):
+    today = datetime.now().astimezone().date().isoformat()
+    params = {
+        "select": (
+            "listing_id,pvp_id,status,data_asta_date,created_at,regione,provincia,"
+            "sigla_provincia,comune,cap,indirizzo,tipologia,latitudine,longitudine,maps_link,"
+            "geocode_precision"
+        ),
+        "status": "eq.active",
+        "data_asta_date": "gte." + today,
+        "order": "pvp_id.asc",
+    }
+    if explicit_ids:
+        params["pvp_id"] = "in.(" + ",".join(explicit_ids) + ")"
+    return _all(base, key, "listings", params)
+
+
+def _fetch_primary_location_meta(base, key, pvp_ids):
+    out = {}
+    for start in range(0, len(pvp_ids), 100):
+        batch = pvp_ids[start:start + 100]
+        rows = _get(
+            base,
+            key,
+            "listing_locations",
+            {
+                "select": (
+                    "pvp_id,resolver_version,source,precision,status,address_raw,"
+                    "comune_pvp,provincia_pvp,sigla_provincia_pvp,cap_pvp,codice_istat,"
+                    "pvp_latitudine,pvp_longitudine"
+                ),
+                "pvp_id": "in.(" + ",".join(batch) + ")",
+                "is_primary": "eq.true",
+                "limit": "500",
+            },
+        )
+        for row in rows:
+            out[str(row.get("pvp_id") or "")] = row
+    return out
+
+
+def _fetch_locations_snapshot(base, key, listing_id):
+    return _all(
+        base,
+        key,
+        "listing_locations",
+        {
+            "select": LOCATION_FIELDS,
+            "listing_id": "eq." + str(listing_id),
+            "order": "bene_index.asc",
+        },
+    )
+
+
+def _sanitize_locations_for_rpc(rows):
+    keys = LOCATION_FIELDS.split(",")
+    out = []
+    for row in rows:
+        item = {k: row.get(k) for k in keys}
+        item["warnings"] = list(item.get("warnings") or [])
+        out.append(item)
+    return out
+
+
+def _build_candidates(base, key, explicit_ids, limit):
+    listings = _fetch_active_listings(base, key, explicit_ids)
+    ids = [str(x.get("pvp_id") or "") for x in listings if x.get("pvp_id")]
+    meta = _fetch_primary_location_meta(base, key, ids)
+    candidates = []
+    skipped_modern = 0
+    for row in listings:
+        pid = str(row.get("pvp_id") or "")
+        primary = meta.get(pid) or {}
+        modern = str(primary.get("resolver_version") or "") == MODERN_RESOLVER
+        if explicit_ids or not modern:
+            item = dict(row)
+            item["_legacy_primary"] = primary
+            candidates.append(item)
+        else:
+            skipped_modern += 1
+    if limit and limit > 0:
+        candidates = candidates[:limit]
+    return listings, candidates, skipped_modern
+
+
+def _load_raw_index(path, wanted_ids):
+    path = Path(path)
+    wanted = {str(x) for x in wanted_ids}
+    found = {}
+    scanned = 0
+    malformed = 0
+    if not path.is_file():
+        return found, {
+            "raw_file": str(path),
+            "raw_file_present": False,
+            "raw_rows_scanned": 0,
+            "raw_rows_malformed": 0,
+            "raw_targets_found": 0,
+            "raw_targets_missing": len(wanted),
+        }
+    with path.open("r", encoding="utf-8", errors="replace") as src:
+        for line in src:
+            if not line.strip():
+                continue
+            scanned += 1
+            try:
+                obj = json.loads(line)
+            except Exception:
+                malformed += 1
+                continue
+            pid = str(obj.get("pvp_id") or "")
+            if pid in wanted:
+                found[pid] = obj
+                if len(found) == len(wanted):
+                    break
+    return found, {
+        "raw_file": str(path),
+        "raw_file_present": True,
+        "raw_rows_scanned": scanned,
+        "raw_rows_malformed": malformed,
+        "raw_targets_found": len(found),
+        "raw_targets_missing": len(wanted) - len(found),
+    }
+
+
+def _synthetic_raw_from_db(listing):
+    primary = listing.get("_legacy_primary") or {}
+    via = (
+        primary.get("address_raw")
+        or listing.get("indirizzo")
+        or ""
+    )
+    comune = primary.get("comune_pvp") or listing.get("comune") or ""
+    provincia = (
+        listing.get("sigla_provincia")
+        or primary.get("sigla_provincia_pvp")
+        or primary.get("provincia_pvp")
+        or listing.get("provincia")
+        or ""
+    )
+    addr = {
+        "via": via,
+        "cap": primary.get("cap_pvp") or listing.get("cap"),
+        "descComune": comune,
+        "codComune": primary.get("codice_istat"),
+        "codProvincia": provincia,
+        "descProvincia": listing.get("provincia") or primary.get("provincia_pvp"),
+        "descRegione": listing.get("regione"),
+        # Deliberately do not reuse legacy coordinates: they may be the bad pin
+        # we are trying to repair.
+        "coordinate": {},
+    }
+    return {
+        "pvp_id": str(listing.get("pvp_id") or ""),
+        "link_pvp": listing.get("link_pvp"),
+        "search_item": {},
+        "detail_body": {
+            "beni": [
+                {
+                    "descTipologiaBene": listing.get("tipologia"),
+                    "indirizzo": addr,
+                }
+            ]
+        },
+    }
+
+
+def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary):
+    pid = str(listing["pvp_id"])
+
+    resolved = address_resolver.process_row(raw)
+    if not resolved.get("primary"):
+        raise RuntimeError("No physical bene address found in PVP detail")
+
+    ann = anncsu_match.process(resolved, ann_db)
+    loc = locality_match.process(resolved, loc_db)
+    unified = unified_offline.process(resolved, ann, loc)
+    locations, problems = materializer.build_rows({pid: resolved}, {pid: unified})
+    if problems:
+        raise RuntimeError("Materialized location problems: " + json.dumps(problems[:5], ensure_ascii=False))
+    if not locations:
+        raise RuntimeError("No listing_locations rows materialized")
+
+    primaries = [x for x in locations if x.get("is_primary") is True]
+    if len(primaries) != 1:
+        raise RuntimeError(f"Expected exactly one primary location; got {len(primaries)}")
+    primary = primaries[0]
+
+    pin, no_pin_reason = pin_publisher.choose_pin(primary, pin_ann, pin_istat, pin_cache)
+
+    if pin is not None and pin.get("source") == "PVP" and pin.get("precision") == "PVP_COORD":
+        check = boundary.test(
+            {
+                "comune": listing.get("comune"),
+                "provincia": listing.get("provincia"),
+                "sigla_provincia": listing.get("sigla_provincia"),
+                "regione": listing.get("regione"),
+            },
+            lat=pin.get("lat"),
+            lon=pin.get("lon"),
+        )
+        if not check.get("safe"):
+            pin, no_pin_reason = pin_publisher.municipality_fallback(
+                primary, pin_ann, pin_istat, pin_cache
+            )
+
+    if pin is None:
+        rep = boundary.representative_point(
+            {
+                "comune": listing.get("comune"),
+                "provincia": listing.get("provincia"),
+                "sigla_provincia": listing.get("sigla_provincia"),
+                "regione": listing.get("regione"),
+            }
+        )
+        if not rep.get("ok"):
+            raise RuntimeError(
+                f"No safe fallback pin: {no_pin_reason}; boundary={rep.get('reason')}"
+            )
+        pin = {
+            "lat": rep["lat"],
+            "lon": rep["lon"],
+            "source": "istat_boundary_comune_indicativo",
+            "precision": "COMUNE",
+            "reason": (
+                "Punto rappresentativo verificato all'interno del confine comunale ISTAT 2026; "
+                "non rappresenta la posizione esatta dell'immobile."
+            ),
+            "formatted_address": "Comune di " + str(listing.get("comune") or ""),
+            "fallback_from_status": str(primary.get("status") or "UNKNOWN"),
+        }
+
+    now = datetime.now().astimezone().isoformat()
+    updated_locations = []
+    for location in locations:
+        item = dict(location)
+        item["checked_at"] = now
+        if item.get("is_primary") is True:
+            warnings = list(item.get("warnings") or [])
+            if pin.get("fallback_from_status") is not None:
+                marker = (
+                    "HISTORICAL_BACKFILL_FALLBACK_FROM_"
+                    + str(pin.get("fallback_from_status") or "UNKNOWN").upper()
+                )
+                if marker not in warnings:
+                    warnings.append(marker)
+            item.update(
+                {
+                    "latitudine": float(pin["lat"]),
+                    "longitudine": float(pin["lon"]),
+                    "source": pin["source"],
+                    "precision": pin["precision"],
+                    "status": "RESOLVED",
+                    "formatted_address": pin.get("formatted_address"),
+                    "resolution_reason": pin.get("reason"),
+                    "warnings": warnings,
+                    "resolver_version": MODERN_RESOLVER,
+                }
+            )
+        updated_locations.append(item)
+
+    parent_precision = _parent_precision(pin["precision"])
+    safe, safe_reason = _safe_to_apply(
+        listing.get("geocode_precision"),
+        parent_precision,
+        pin.get("precision"),
+    )
+    if input_source == "DB_SYNTHETIC" and str(pin.get("precision") or "").upper() not in {"CIVICO", "STRADA"}:
+        safe = False
+        safe_reason = "RAW_REQUIRED_FOR_AMBIGUOUS_DB_SYNTHETIC"
+    movement = _haversine_m(
+        listing.get("latitudine"),
+        listing.get("longitudine"),
+        pin["lat"],
+        pin["lon"],
+    )
+    primary_resolved = resolved.get("primary") or {}
+
+    return {
+        "pvp_id": pid,
+        "listing_id": listing.get("listing_id"),
+        "comune": listing.get("comune"),
+        "indirizzo_db": listing.get("indirizzo"),
+        "input_source": input_source,
+        "raw_beni_count": resolved.get("beni_count"),
+        "raw_multi_address": bool(resolved.get("multi_address")),
+        "raw_multi_comune": bool(resolved.get("multi_comune")),
+        "address_raw_pvp": primary_resolved.get("raw_via"),
+        "street_pvp": primary_resolved.get("street"),
+        "civic_pvp": primary_resolved.get("civic_for_geocode"),
+        "old": {
+            "latitudine": listing.get("latitudine"),
+            "longitudine": listing.get("longitudine"),
+            "geocode_precision": listing.get("geocode_precision"),
+        },
+        "new": {
+            "latitudine": float(pin["lat"]),
+            "longitudine": float(pin["lon"]),
+            "geocode_precision": parent_precision,
+            "technical_precision": pin.get("precision"),
+            "source": pin.get("source"),
+            "reason": pin.get("reason"),
+            "formatted_address": pin.get("formatted_address"),
+        },
+        "movement_m": round(movement, 1) if movement is not None else None,
+        "same_parent_pin": (
+            _same_coord(
+                listing.get("latitudine"),
+                listing.get("longitudine"),
+                pin["lat"],
+                pin["lon"],
+            )
+            and str(listing.get("geocode_precision") or "").upper() == parent_precision
+        ),
+        "safe_to_apply": safe,
+        "safe_reason": safe_reason,
+        "locations": updated_locations,
+    }
+
+
+def _replace_locations(base, key, pid, locations, validate=False):
+    rpc = (
+        "aste_validate_replace_listing_locations_v1"
+        if validate
+        else "aste_replace_listing_locations_v1"
+    )
+    return _rpc(
+        base,
+        key,
+        rpc,
+        {
+            "p_pvp_id": str(pid),
+            "p_locations": _sanitize_locations_for_rpc(locations),
+        },
+    )
+
+
+def _patch_parent(base, key, listing_id, payload):
+    rows = _patch(
+        base,
+        key,
+        "listings",
+        {"listing_id": "eq." + str(listing_id)},
+        payload,
+    )
+    if not isinstance(rows, list) or len(rows) != 1:
+        raise RuntimeError(
+            f"Parent PATCH expected one row, got {len(rows) if isinstance(rows, list) else 'non-list'}"
+        )
+    return rows[0]
+
+
+def _verify_case(base, key, case):
+    pid = str(case["pvp_id"])
+    rows = _get(
+        base,
+        key,
+        "listings",
+        {
+            "select": "pvp_id,latitudine,longitudine,maps_link,geocode_precision",
+            "pvp_id": "eq." + pid,
+            "limit": "2",
+        },
+    )
+    if len(rows) != 1:
+        return False, "parent row missing/duplicate"
+    parent = rows[0]
+    expected = case["new"]
+    if not _same_coord(
+        parent.get("latitudine"),
+        parent.get("longitudine"),
+        expected["latitudine"],
+        expected["longitudine"],
+    ):
+        return False, "parent coordinates mismatch"
+    if str(parent.get("geocode_precision") or "") != str(expected["geocode_precision"]):
+        return False, "parent precision mismatch"
+
+    locs = _get(
+        base,
+        key,
+        "listing_locations",
+        {
+            "select": "pvp_id,is_primary,latitudine,longitudine,source,precision,status,resolver_version,bene_index",
+            "pvp_id": "eq." + pid,
+            "order": "bene_index.asc",
+            "limit": "100",
+        },
+    )
+    primaries = [x for x in locs if x.get("is_primary") is True]
+    if len(locs) != len(case["locations"]):
+        return False, "location count mismatch"
+    if len(primaries) != 1:
+        return False, "primary location count mismatch"
+    primary = primaries[0]
+    if not _same_coord(
+        primary.get("latitudine"),
+        primary.get("longitudine"),
+        expected["latitudine"],
+        expected["longitudine"],
+    ):
+        return False, "primary location coordinates mismatch"
+    return True, "PASS"
+
+
+def _apply_case(base, key, case):
+    pid = str(case["pvp_id"])
+    listing_id = str(case["listing_id"])
+    old_parent_rows = _get(
+        base,
+        key,
+        "listings",
+        {
+            "select": "listing_id,latitudine,longitudine,maps_link,geocode_precision",
+            "listing_id": "eq." + listing_id,
+            "limit": "2",
+        },
+    )
+    if len(old_parent_rows) != 1:
+        raise RuntimeError("Unable to snapshot parent listing")
+    old_parent = old_parent_rows[0]
+    old_locations = _fetch_locations_snapshot(base, key, listing_id)
+
+    new_locations = case["locations"]
+    _replace_locations(base, key, pid, new_locations, validate=True)
+
+    child_written = False
+    parent_written = False
+    try:
+        _replace_locations(base, key, pid, new_locations, validate=False)
+        child_written = True
+
+        new = case["new"]
+        _patch_parent(
+            base,
+            key,
+            listing_id,
+            {
+                "latitudine": new["latitudine"],
+                "longitudine": new["longitudine"],
+                "maps_link": _maps_link(new["latitudine"], new["longitudine"]),
+                "geocode_precision": new["geocode_precision"],
+            },
+        )
+        parent_written = True
+
+        ok, reason = _verify_case(base, key, case)
+        if not ok:
+            raise RuntimeError("Post-apply verification failed: " + reason)
+        return {"status": "PASS"}
+
+    except Exception:
+        rollback_errors = []
+        if child_written:
+            try:
+                if old_locations:
+                    _replace_locations(base, key, pid, old_locations, validate=False)
+                else:
+                    _delete(base, key, "listing_locations", {"listing_id": "eq." + listing_id})
+            except Exception as exc:
+                rollback_errors.append("locations=" + repr(exc))
+        if parent_written:
+            try:
+                _patch_parent(
+                    base,
+                    key,
+                    listing_id,
+                    {
+                        "latitudine": old_parent.get("latitudine"),
+                        "longitudine": old_parent.get("longitudine"),
+                        "maps_link": old_parent.get("maps_link"),
+                        "geocode_precision": old_parent.get("geocode_precision"),
+                    },
+                )
+            except Exception as exc:
+                rollback_errors.append("parent=" + repr(exc))
+        if rollback_errors:
+            raise RuntimeError(
+                "Apply failed and rollback was incomplete: " + "; ".join(rollback_errors)
+            )
+        raise
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Re-resolve active historical auction pins with the current offline geocoder"
+    )
+    ap.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply only safe non-downgrading results; default is preview",
+    )
+    ap.add_argument(
+        "--pvp-ids",
+        default="",
+        help="Optional comma-separated PVP IDs; bypasses modern-resolver skip",
+    )
+    ap.add_argument(
+        "--max-rows",
+        type=int,
+        default=0,
+        help="0 = all eligible candidates",
+    )
+    ap.add_argument(
+        "--raw-file",
+        default=str(Path(RAW_DIR) / "listings_api_raw.jsonl"),
+        help="Historical PVP RAW JSONL. Missing rows fall back to DB-derived synthetic input.",
+    )
+    ap.add_argument(
+        "--require-raw",
+        action="store_true",
+        help="Do not synthesize missing RAW rows; report them as errors instead.",
+    )
+    args = ap.parse_args(argv)
+    if args.max_rows < 0:
+        ap.error("--max-rows must be >= 0")
+    ensure_runtime_dirs()
+    load_project_env(required=("SUPABASE_URL", "SUPABASE_SERVICE_ROLE"))
+    base = os.environ["SUPABASE_URL"].rstrip("/")
+    key = os.environ["SUPABASE_SERVICE_ROLE"]
+    explicit_ids = _parse_ids(args.pvp_ids)
+
+    all_active, candidates, skipped_modern = _build_candidates(
+        base, key, explicit_ids, args.max_rows
+    )
+    wanted_ids = [str(x.get("pvp_id") or "") for x in candidates]
+    raw_index, raw_stats = _load_raw_index(args.raw_file, wanted_ids)
+    print(
+        f"[BACKFILL] active_future={len(all_active)} candidates={len(candidates)} "
+        f"skipped_modern={skipped_modern} explicit={len(explicit_ids)} apply={int(args.apply)} "
+        f"raw_found={raw_stats['raw_targets_found']} raw_missing={raw_stats['raw_targets_missing']} "
+        f"raw_file_present={int(raw_stats['raw_file_present'])}",
+        flush=True,
+    )
+
+    ann_path = Path(
+        os.environ.get("ANNCSU_SQLITE_INDEX", "")
+        or (ANNCSU_DIR / "anncsu_runtime.sqlite3")
+    )
+    istat_path = Path(
+        os.environ.get("ISTAT_LOCALITY_INDEX", "")
+        or (DATA_DIR / "istat" / "istat_localita_2021.sqlite3")
+    )
+
+    ann_db = anncsu_match.DB(ann_path)
+    loc_db = locality_match.DB(istat_path)
+    pin_ann = pin_publisher.open_anncsu_bbox()
+    pin_istat = pin_publisher.open_istat_localities()
+    pin_cache = {}
+    boundary = boundary_runtime.BoundaryContext()
+
+    cases = []
+    errors = []
+    counters = Counter()
+    started = time.perf_counter()
+
+    try:
+        for index, listing in enumerate(candidates, 1):
+            pid = str(listing["pvp_id"])
+            try:
+                raw = raw_index.get(pid)
+                if raw is not None:
+                    input_source = "RAW_PVP_HISTORICAL"
+                elif args.require_raw:
+                    raise RuntimeError("Historical RAW not available for this pvp_id")
+                else:
+                    raw = _synthetic_raw_from_db(listing)
+                    input_source = "DB_SYNTHETIC"
+                case = _resolve_one(
+                    listing,
+                    raw,
+                    input_source,
+                    ann_db,
+                    loc_db,
+                    pin_ann,
+                    pin_istat,
+                    pin_cache,
+                    boundary,
+                )
+                cases.append(case)
+                counters["resolved"] += 1
+                counters[
+                    "safe_to_apply" if case["safe_to_apply"] else "blocked_downgrade"
+                ] += 1
+                counters[
+                    "same_parent_pin" if case["same_parent_pin"] else "changed_parent_pin"
+                ] += 1
+                counters["input:" + str(case.get("input_source") or "NONE")] += 1
+                counters["source:" + str(case["new"]["source"] or "NONE")] += 1
+                counters[
+                    "precision:" + str(case["new"]["technical_precision"] or "NONE")
+                ] += 1
+
+                if args.apply and case["safe_to_apply"]:
+                    _apply_case(base, key, case)
+                    counters["applied"] += 1
+
+                print(
+                    f"[BACKFILL] {index}/{len(candidates)} pvp={pid} "
+                    f"{case['old']['geocode_precision']} -> {case['new']['geocode_precision']} "
+                    f"{case['new']['source']}/{case['new']['technical_precision']} "
+                    f"input={case['input_source']} move={case['movement_m']}m safe={case['safe_to_apply']}",
+                    flush=True,
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "pvp_id": pid,
+                        "listing_id": listing.get("listing_id"),
+                        "comune": listing.get("comune"),
+                        "indirizzo": listing.get("indirizzo"),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
+                counters["errors"] += 1
+                print(
+                    f"[BACKFILL ERROR] pvp={pid} {type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+
+    finally:
+        ann_db.close()
+        loc_db.close()
+        pin_ann.close()
+        pin_istat.close()
+
+    canonical = [
+        {
+            "pvp_id": x["pvp_id"],
+            "old": x["old"],
+            "new": x["new"],
+            "safe_to_apply": x["safe_to_apply"],
+        }
+        for x in cases
+    ]
+    plan_sha = hashlib.sha256(
+        json.dumps(
+            canonical,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+    summary = {
+        "version": VERSION,
+        "mode": "APPLY_SAFE_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
+        "created_at": datetime.now().astimezone().isoformat(),
+        "active_future_listings": len(all_active),
+        "eligible_candidates": len(candidates),
+        "skipped_already_modern": skipped_modern,
+        "explicit_pvp_ids": explicit_ids,
+        "max_rows": args.max_rows,
+        "raw_stats": raw_stats,
+        "plan_sha256": plan_sha,
+        "counts": dict(counters),
+        "db_writes": counters.get("applied", 0) if args.apply else 0,
+        "errors": errors,
+        "cases": cases,
+        "elapsed_seconds": round(time.perf_counter() - started, 3),
+        "google_calls": 0,
+    }
+
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = "apply" if args.apply else "preview"
+    out = REPORTS_DIR / f"historical_geocode_backfill_v1_{suffix}.json"
+    out.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        json.dumps(
+            {k: v for k, v in summary.items() if k != "cases"},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    print("[OUT]", out)
+
+    if args.apply and errors:
+        raise RuntimeError(
+            f"Backfill apply completed with {len(errors)} unresolved PVP/resolver errors; inspect report"
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
