@@ -73,6 +73,7 @@ def source_admin_matches_listing(listing, loc, boundary):
         "comune": loc.get("comune_pvp"),
         "provincia": loc.get("provincia_pvp"),
         "sigla_provincia": loc.get("sigla_provincia_pvp"),
+        "regione": listing.get("regione"),
     })
     parent_code = str(parent_meta.get("canonical_code") or "")
     physical_code = str(physical_meta.get("canonical_code") or "")
