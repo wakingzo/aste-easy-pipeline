@@ -89,6 +89,51 @@ def source_admin_matches_listing(listing, loc, boundary):
     return None, "RAW_ADMIN_NOT_CANONICAL"
 
 
+def guard_pin_for_listing(pin, listing, loc, boundary):
+    """Validate EVERY proposed pin (including ANNCSU, ISTAT, and fallback).
+
+    Returns a conservative listing-municipality indicator if a candidate lies
+    outside the canonical listing commune or the physical bene has a different
+    canonical commune. Never publishes a misplaced point as CIVICO/PVP_COORD.
+    """
+    same_admin, admin_reason = source_admin_matches_listing(
+        listing, loc, boundary
+    )
+    position = boundary.test(
+        listing, lat=pin.get("lat"), lon=pin.get("lon")
+    )
+    if same_admin is True and position.get("safe") is True:
+        return pin, "PASS"
+
+    reason = (
+        "RAW_ADMIN_CONFLICT" if same_admin is False else
+        "RAW_ADMIN_UNRESOLVED" if same_admin is None else
+        "PIN_OUTSIDE_LISTING_COMUNE"
+    )
+    rep = boundary.representative_point(listing)
+    if not rep.get("ok"):
+        raise RuntimeError(
+            f"UNSAFE_PIN_NO_FALLBACK reason={reason} "
+            f"raw_admin={admin_reason} boundary={position.get('position')} "
+            f"fallback={rep.get('reason')}"
+        )
+    safe = {
+        "lat": rep["lat"],
+        "lon": rep["lon"],
+        "source": "istat_boundary_comune_indicativo",
+        "precision": "COMUNE",
+        "status": "DONE",
+        "reason": (
+            "Posizione indicativa nel comune della scheda, non ubicazione "
+            "dell'immobile: candidato scartato dal controllo territoriale "
+            f"({reason}; {admin_reason}; {position.get('position')})."
+        ),
+        "formatted_address": "Comune di " + str(listing.get("comune") or ""),
+        "fallback_from_status": reason,
+    }
+    return safe, reason
+
+
 def published_confidence(pin, original_confidence):
     """A representative COMUNE pin is not evidence of a precise property location."""
     if str((pin or {}).get("precision") or "").upper() == "COMUNE":
