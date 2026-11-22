@@ -893,7 +893,12 @@ def main(argv=None):
         "--max-rows",
         type=int,
         default=0,
-        help="0 = all eligible candidates",
+        help="0 = all eligible candidates; with --require-raw selects RAW-only batch",
+    )
+    ap.add_argument(
+        "--after-pvp-id",
+        default="",
+        help="Continue after this PVP ID in database TEXT order; avoid rescanning permanently blocked IDs",
     )
     ap.add_argument("--google-conflict-max-http", type=int, default=0,
                     help="0=offline; explicitly authorize at most 1..3 Google requests in PREVIEW only for >1 km PVP/ANNCSU conflicts")
@@ -912,6 +917,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be >= 0")
+    if args.after_pvp_id and not args.after_pvp_id.isdigit():
+        ap.error("--after-pvp-id must be a numeric PVP ID")
     if not 0 <= args.google_conflict_max_http <= 3:
         ap.error("--google-conflict-max-http must be 0..3")
     if not 1 <= args.google_conflict_monthly_cap <= 9000:
@@ -937,6 +944,12 @@ def main(argv=None):
     raw_index, raw_stats = _load_raw_index(args.raw_file, wanted_ids)
     if args.require_raw:
         candidates = [row for row in candidates if str(row["pvp_id"]) in raw_index]
+    if args.after_pvp_id:
+        # pvp_id is TEXT in Supabase, and the query orders it lexically.
+        candidates = [
+            row for row in candidates
+            if str(row["pvp_id"]) > args.after_pvp_id
+        ]
     if args.max_rows:
         candidates = candidates[:args.max_rows]
     print(
@@ -1107,6 +1120,9 @@ def main(argv=None):
         "skipped_already_modern": skipped_modern,
         "explicit_pvp_ids": explicit_ids,
         "max_rows": args.max_rows,
+        "after_pvp_id": args.after_pvp_id,
+        "batch_first_pvp_id": str(candidates[0]["pvp_id"]) if candidates else None,
+        "batch_last_pvp_id": str(candidates[-1]["pvp_id"]) if candidates else None,
         "raw_stats": raw_stats,
         "plan_sha256": plan_sha,
         "counts": dict(counters),
