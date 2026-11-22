@@ -192,8 +192,8 @@ def _safe_to_apply(*, input_source, technical_precision, original_status,
     """
     if input_source != "RAW_PVP_HISTORICAL":
         return False, "RAW_REQUIRED_BEFORE_APPLY"
-    if location_count != 1:
-        return False, "MULTI_BENE_NEEDS_PER_BENE_RESOLUTION"
+    if location_count < 1:
+        return False, "RAW_BENI_MISSING"
     if admin_matches is False:
         return False, "RAW_SOURCE_COMUNE_CONFLICT"
     if admin_matches is None:
@@ -396,7 +396,100 @@ def _synthetic_raw_from_db(listing):
     }
 
 
-def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary, arbitrator=None):
+def _merge_stored_secondary_locations(fresh_locations, stored_locations):
+    """Keep every RAW bene and prevent loss of already saved secondary data.
+
+    RAW bene_index is authoritative for the new shape; legacy secondary fields
+    only fill holes, and existing secondary geocodes survive only when the
+    original address/municipality matches at the same bene_index. There is
+    still exactly ONE primary, and no new secondary map marker is published.
+    """
+    fresh = [dict(r) for r in fresh_locations]
+    if len({r["bene_index"] for r in fresh}) != len(fresh):
+        raise RuntimeError("Duplicate RAW bene_index during secondary merge")
+    if sum(r.get("is_primary") is True for r in fresh) != 1:
+        raise RuntimeError("RAW materialization must contain exactly one primary")
+
+    old = {}
+    for row in stored_locations or []:
+        idx = row.get("bene_index")
+        if idx in old:
+            raise RuntimeError("Duplicate stored bene_index during secondary merge")
+        old[idx] = row
+
+    # We cannot safely discard extra rows whose identity cannot be reconciled
+    # against the primary PVP source. Require a dedicated review instead.
+    extra = set(old).difference(r["bene_index"] for r in fresh)
+    if extra:
+        raise RuntimeError(
+            "Stored secondary bene_index missing in RAW: " + ",".join(map(str, sorted(extra)))
+        )
+
+    fallback_fields = (
+        "address_raw", "comune_pvp", "provincia_pvp", "sigla_provincia_pvp",
+        "cap_pvp", "codice_istat", "street", "civic", "internal", "locality",
+    )
+    result = []
+    for item in fresh:
+        if item.get("is_primary") is True:
+            result.append(item)
+            continue
+        existing = old.get(item["bene_index"])
+        if existing is None:
+            result.append(item)
+            continue
+
+        used_existing = False
+        for k in fallback_fields:
+            if item.get(k) in (None, "") and existing.get(k) not in (None, ""):
+                item[k] = existing[k]
+                used_existing = True
+        if (
+            item.get("pvp_latitudine") is None
+            and item.get("pvp_longitudine") is None
+            and existing.get("pvp_latitudine") is not None
+            and existing.get("pvp_longitudine") is not None
+            and existing.get("is_primary") is False
+        ):
+            item["pvp_latitudine"] = existing["pvp_latitudine"]
+            item["pvp_longitudine"] = existing["pvp_longitudine"]
+            used_existing = True
+
+        # Do not silently erase an existing secondary resolution. Only retain
+        # it when the physical address and commune have the same RAW identity.
+        if existing.get("is_primary") is False and (
+            existing.get("latitudine") is not None
+            or existing.get("longitudine") is not None
+        ):
+            def normalized(v):
+                return " ".join(str(v or "").casefold().split())
+            if (
+                normalized(existing.get("address_raw")) != normalized(item.get("address_raw"))
+                or normalized(existing.get("comune_pvp")) != normalized(item.get("comune_pvp"))
+                or existing.get("latitudine") is None
+                or existing.get("longitudine") is None
+            ):
+                raise RuntimeError("Secondary resolved location identity changed; refuse overwrite")
+            for k in (
+                "latitudine", "longitudine", "source", "precision", "confidence",
+                "status", "formatted_address", "anncsu_status", "google_status",
+                "resolution_reason", "resolver_version",
+            ):
+                item[k] = existing.get(k)
+            item["warnings"] = list(dict.fromkeys(
+                list(item.get("warnings") or []) + list(existing.get("warnings") or [])
+            ))
+            used_existing = True
+
+        if used_existing:
+            item["warnings"] = list(dict.fromkeys(
+                list(item.get("warnings") or []) + ["HISTORICAL_SECONDARY_DATA_PRESERVED"]
+            ))
+        result.append(item)
+    return result
+
+
+def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary, arbitrator=None, stored_locations_loader=None):
     pid = str(listing["pvp_id"])
 
     resolved = address_resolver.process_row(raw)
@@ -411,6 +504,9 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         raise RuntimeError("Materialized location problems: " + json.dumps(problems[:5], ensure_ascii=False))
     if not locations:
         raise RuntimeError("No listing_locations rows materialized")
+    if input_source == "RAW_PVP_HISTORICAL" and len(locations) > 1:
+        stored = stored_locations_loader(listing["listing_id"]) if stored_locations_loader else []
+        locations = _merge_stored_secondary_locations(locations, stored)
 
     primaries = [x for x in locations if x.get("is_primary") is True]
     if len(primaries) != 1:
@@ -854,6 +950,7 @@ def main(argv=None):
                     pin_cache,
                     boundary,
                     arbitrator=arbitrator,
+                    stored_locations_loader=lambda lid: _fetch_locations_snapshot(base, key, lid),
                 )
                 cases.append(case)
                 counters["resolved"] += 1
