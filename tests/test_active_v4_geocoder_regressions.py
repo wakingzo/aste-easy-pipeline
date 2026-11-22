@@ -108,10 +108,29 @@ class _FakeGoogle:
 
 class _FakeBoundary:
     @staticmethod
+    def resolve_admin(row):
+        canonical = {
+            "Olbia": "090047", "Lentini": "089011",
+            "Siracusa": "089017", "Borgosesia": "002016",
+            "Vercelli": "002158", "Popoli Terme": "068033",
+            "Popoli": "068033",
+        }
+        comune = row.get("comune") or ""
+        code = canonical.get(comune)
+        return {
+            "status": "RESOLVED" if code else "UNRESOLVED",
+            "canonical_code": code,
+        }
+
+    @staticmethod
+    def representative_point(row):
+        return {"ok": True, "lat": 40.1, "lon": 9.1}
+
+    @staticmethod
     def test(row, *, lat, lon):
         if lat > 41:
-            return {"position": "OUTSIDE"}
-        return {"position": "INSIDE"}
+            return {"position": "OUTSIDE", "safe": False}
+        return {"position": "INSIDE", "safe": True}
 
 
 def _google_result(lat, **kwargs):
@@ -291,3 +310,41 @@ def test_rebaseline_accepts_indicative_comune_without_coherent_pvp():
 def test_rebaseline_blocks_new_pin_outside_canonical_comune():
     ok, why = _eligible_rebaseline(new_pin_safe=False)
     assert not ok and why == "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
+
+
+def test_real_admin_alias_compares_canonical_codes_not_names():
+    from src.geocoding.primary_pin_publisher_v2_preview import source_admin_matches_listing
+    listing = {"comune": "Popoli Terme"}
+    loc = {"comune_pvp": "Popoli"}
+    assert source_admin_matches_listing(listing, loc, _FakeBoundary())[0] is True
+
+
+def test_real_admin_conflicts_are_not_trusted_even_if_pin_in_listing_comune():
+    from src.geocoding.primary_pin_publisher_v2_preview import (
+        source_admin_matches_listing, guard_pin_for_listing
+    )
+    listing = {"comune": "Lentini"}
+    loc = {"comune_pvp": "Siracusa"}
+    match, why = source_admin_matches_listing(listing, loc, _FakeBoundary())
+    assert match is False and why.startswith("RAW_ADMIN_MISMATCH:")
+    pin = {"lat": 40., "lon": 9., "precision": "CIVICO", "source": "ANNCSU"}
+    fallback, reason = guard_pin_for_listing(pin, listing, loc, _FakeBoundary())
+    assert reason == "RAW_ADMIN_CONFLICT"
+    assert fallback["precision"] == "COMUNE"
+    assert fallback["source"] == "istat_boundary_comune_indicativo"
+    assert fallback["formatted_address"] == "Comune di Lentini"
+
+
+def test_any_civic_outside_listing_municipality_is_downgraded():
+    from src.geocoding.primary_pin_publisher_v2_preview import guard_pin_for_listing
+    listing = {"comune": "Olbia"}
+    loc = {"comune_pvp": "Olbia"}
+    pin = {"lat": 41.5, "lon": 9., "source": "ANNCSU", "precision": "CIVICO"}
+    fallback, reason = guard_pin_for_listing(pin, listing, loc, _FakeBoundary())
+    assert reason == "PIN_OUTSIDE_LISTING_COMUNE"
+    assert fallback["precision"] == "COMUNE"
+
+
+def test_raw_admin_conflict_cannot_be_applied_in_historical_rebaseline():
+    ok, why = _eligible_rebaseline(admin_matches=False)
+    assert not ok and why == "RAW_SOURCE_COMUNE_CONFLICT"
