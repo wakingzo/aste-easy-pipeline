@@ -66,7 +66,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m py_compile             src/geocoding/historical_geocode_backfill_v1.py             src/geocoding/primary_pin_publisher_v2_preview.py
+          python -m py_compile \
+            src/geocoding/historical_geocode_backfill_v2.py \
+            src/geocoding/primary_pin_publisher_v2_preview.py
 
       - name: Create ephemeral container env file
         shell: bash
@@ -236,7 +238,7 @@ jobs:
           MAX_ROWS: ${{ inputs.max_rows || '0' }}
         run: |
           set -euo pipefail
-          args=(python src/geocoding/historical_geocode_backfill_v1.py --max-rows "$MAX_ROWS")
+          args=(python src/geocoding/historical_geocode_backfill_v2.py --max-rows "$MAX_ROWS")
           if [ "$MODE" = "apply" ]; then
             args+=(--apply)
           fi
@@ -250,7 +252,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: historical-geocode-backfill-${{ github.run_id }}
-          path: runtime/reports/historical_geocode_backfill_v1_*.json
+          path: runtime/reports/historical_geocode_backfill_v2_*.json
           if-no-files-found: warn
           retention-days: 14
           compression-level: 6
@@ -263,7 +265,7 @@ jobs:
           import json
           from pathlib import Path
           files = sorted(
-              Path('runtime/reports').glob('historical_geocode_backfill_v1_*.json'),
+              Path('runtime/reports').glob('historical_geocode_backfill_v2_*.json'),
               key=lambda p: p.stat().st_mtime,
               reverse=True,
           )
@@ -277,7 +279,11 @@ jobs:
           print(f'- Active future listings: **{obj.get("active_future_listings", 0)}**')
           print(f'- Eligible candidates: **{obj.get("eligible_candidates", 0)}**')
           print(f'- Already modern / skipped: **{obj.get("skipped_already_modern", 0)}**')
+          raw = obj.get('raw_stats') or {}
+          print(f'- Historical RAW available: **{raw.get("raw_targets_found", 0)}** / **{obj.get("eligible_candidates", 0)}**')
           print(f'- Resolved: **{counts.get("resolved", 0)}**')
+          print(f'- Input RAW PVP: **{counts.get("input:RAW_PVP_HISTORICAL", 0)}**')
+          print(f'- Input DB synthetic: **{counts.get("input:DB_SYNTHETIC", 0)}**')
           print(f'- Safe to apply: **{counts.get("safe_to_apply", 0)}**')
           print(f'- Blocked downgrades: **{counts.get("blocked_downgrade", 0)}**')
           print(f'- Applied: **{counts.get("applied", 0)}**')
