@@ -1,6 +1,11 @@
 name: Aste Easy historical geocode backfill
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/backfill-preview-all.trigger"
   workflow_dispatch:
     inputs:
       mode:
@@ -226,9 +231,9 @@ jobs:
       - name: Run historical geocode backfill
         shell: bash
         env:
-          MODE: ${{ inputs.mode }}
-          PVP_IDS: ${{ inputs.pvp_ids }}
-          MAX_ROWS: ${{ inputs.max_rows }}
+          MODE: ${{ inputs.mode || 'preview' }}
+          PVP_IDS: ${{ inputs.pvp_ids || '' }}
+          MAX_ROWS: ${{ inputs.max_rows || '0' }}
         run: |
           set -euo pipefail
           args=(python src/geocoding/historical_geocode_backfill_v1.py --max-rows "$MAX_ROWS")
