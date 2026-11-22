@@ -181,15 +181,32 @@ def _parent_precision(technical_precision):
     return mapping[value]
 
 
-def _safe_to_apply(old_precision, new_precision, technical_precision):
-    oldp = str(old_precision or "").strip().upper()
-    newp = str(new_precision or "").strip().upper()
-    tech = str(technical_precision or "").strip().upper()
-    if tech == "CIVICO":
-        return True, "NEW_CIVICO"
-    if PRECISION_RANK.get(newp, 0) >= PRECISION_RANK.get(oldp, 0):
-        return True, "NO_PRECISION_DOWNGRADE"
-    return False, f"WOULD_DOWNGRADE_{oldp or 'UNKNOWN'}_TO_{newp or 'UNKNOWN'}"
+def _safe_to_apply(*, input_source, technical_precision, original_status,
+                   location_count, has_conflict, old_pvp_inside, new_pin_safe):
+    """Rebaseline against RAW + current geocoder, NEVER old claimed precision.
+
+    No synthetic RAW writes, no partial replacement of multi-bene records,
+    no unresolved conflicts, no unverified municipality escapes. A COMUNE
+    fallback is only acceptable when RAW has no coherent PVP coordinate.
+    """
+    if input_source != "RAW_PVP_HISTORICAL":
+        return False, "RAW_REQUIRED_BEFORE_APPLY"
+    if location_count != 1:
+        return False, "MULTI_BENE_NEEDS_PER_BENE_RESOLUTION"
+    if not new_pin_safe:
+        return False, "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
+    tech = str(technical_precision or "").upper()
+    if tech not in {"CIVICO", "PVP_COORD", "STRADA", "LOCALITA", "COMUNE"}:
+        return False, "UNSUPPORTED_NEW_TECHNICAL_PRECISION"
+    if has_conflict and str(original_status or "").upper() != "RESOLVED":
+        return False, "UNRESOLVED_NEW_GEOCODER_CONFLICT"
+    if tech == "COMUNE":
+        if old_pvp_inside:
+            return False, "RAW_PVP_INSIDE_BUT_NEW_ONLY_COMUNE"
+        return True, "RAW_REBASELINE_INDICATIVE_COMUNE"
+    if str(original_status or "").upper() != "RESOLVED":
+        return False, "NEW_GEOCODER_REVIEW_NOT_APPLICABLE"
+    return True, "RAW_REBASELINE_" + tech
 
 
 def _parse_ids(raw):
@@ -475,17 +492,34 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         updated_locations.append(item)
 
     parent_precision = _parent_precision(pin["precision"])
+    admin_row = {
+        "comune": listing.get("comune"),
+        "provincia": listing.get("provincia"),
+        "sigla_provincia": listing.get("sigla_provincia"),
+        "regione": listing.get("regione"),
+    }
+    new_safe = boundary.test(
+        admin_row, lat=pin["lat"], lon=pin["lon"]
+    ).get("safe") is True
+    pvp_safe = boundary.test(
+        admin_row,
+        lat=primary.get("pvp_latitudine"),
+        lon=primary.get("pvp_longitudine"),
+    ).get("safe") is True if (
+        pin_publisher.valid_pair(
+            primary.get("pvp_latitudine"),
+            primary.get("pvp_longitudine"),
+        )
+    ) else False
     safe, safe_reason = _safe_to_apply(
-        listing.get("geocode_precision"),
-        parent_precision,
-        pin.get("precision"),
+        input_source=input_source,
+        technical_precision=pin.get("precision"),
+        original_status=primary.get("status"),
+        location_count=len(updated_locations),
+        has_conflict="PVP_ANNCSU_CIVIC_CONFLICT" in (primary.get("warnings") or []),
+        old_pvp_inside=pvp_safe,
+        new_pin_safe=new_safe,
     )
-    if input_source == "DB_SYNTHETIC":
-        # Synthetic input is useful for a fast read-only diagnosis, but it cannot
-        # prove the original PVP bene structure (multi-bene / multi-address).
-        # Never apply it: require the preserved historical RAW before writes.
-        safe = False
-        safe_reason = "RAW_REQUIRED_BEFORE_APPLY"
     movement = _haversine_m(
         listing.get("latitudine"),
         listing.get("longitudine"),
@@ -706,7 +740,7 @@ def main(argv=None):
     ap.add_argument(
         "--apply",
         action="store_true",
-        help="Apply only safe non-downgrading results; default is preview",
+        help="Apply only RAW-verified current-geocoder results; never trust legacy precision; default is preview",
     )
     ap.add_argument(
         "--pvp-ids",
@@ -813,8 +847,9 @@ def main(argv=None):
                 cases.append(case)
                 counters["resolved"] += 1
                 counters[
-                    "safe_to_apply" if case["safe_to_apply"] else "blocked_downgrade"
+                    "safe_to_apply" if case["safe_to_apply"] else "blocked_rebaseline"
                 ] += 1
+                counters["decision:" + str(case["safe_reason"])] += 1
                 counters[
                     "same_parent_pin" if case["same_parent_pin"] else "changed_parent_pin"
                 ] += 1
