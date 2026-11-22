@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -504,6 +505,8 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         raise RuntimeError("Materialized location problems: " + json.dumps(problems[:5], ensure_ascii=False))
     if not locations:
         raise RuntimeError("No listing_locations rows materialized")
+    if input_source == "RAW_PVP_HISTORICAL" and len(locations) != int(resolved.get("beni_count") or 0):
+        raise RuntimeError("RAW bene count differs from location materialization")
     if input_source == "RAW_PVP_HISTORICAL" and len(locations) > 1:
         stored = stored_locations_loader(listing["listing_id"]) if stored_locations_loader else []
         locations = _merge_stored_secondary_locations(locations, stored)
@@ -847,7 +850,12 @@ def main(argv=None):
     ap.add_argument(
         "--apply",
         action="store_true",
-        help="Apply only RAW-verified current-geocoder results; never trust legacy precision; default is preview",
+        help="Apply ONLY a preview-authorized exact RAW batch; default is zero writes",
+    )
+    ap.add_argument(
+        "--expected-plan-sha",
+        default="",
+        help="Required with --apply: plan_sha256 copied from matching RAW-only batch preview",
     )
     ap.add_argument(
         "--pvp-ids",
@@ -883,17 +891,27 @@ def main(argv=None):
         ap.error("--google-conflict-monthly-cap must be 1..9000")
     if args.apply and args.google_conflict_max_http:
         ap.error("Live Google cross-check is PREVIEW-only for historical backfill; zero apply writes")
+    if args.apply and (not args.expected_plan_sha or not args.require_raw or not 1 <= args.max_rows <= 250):
+        ap.error("--apply requires --expected-plan-sha, --require-raw and --max-rows 1..250")
+    if args.apply and not re.fullmatch(r"[a-fA-F0-9]{64}", args.expected_plan_sha or ""):
+        ap.error("--expected-plan-sha must be a 64-character SHA256")
     ensure_runtime_dirs()
     load_project_env(required=("SUPABASE_URL", "SUPABASE_SERVICE_ROLE"))
     base = os.environ["SUPABASE_URL"].rstrip("/")
     key = os.environ["SUPABASE_SERVICE_ROLE"]
     explicit_ids = _parse_ids(args.pvp_ids)
 
+    # Collect RAW coverage before applying the batch limit, so a batch of 50
+    # means 50 RAW auctions, not 50 legacy rows with mostly synthetic input.
     all_active, candidates, skipped_modern = _build_candidates(
-        base, key, explicit_ids, args.max_rows
+        base, key, explicit_ids, 0
     )
     wanted_ids = [str(x.get("pvp_id") or "") for x in candidates]
     raw_index, raw_stats = _load_raw_index(args.raw_file, wanted_ids)
+    if args.require_raw:
+        candidates = [row for row in candidates if str(row["pvp_id"]) in raw_index]
+    if args.max_rows:
+        candidates = candidates[:args.max_rows]
     print(
         f"[BACKFILL] active_future={len(all_active)} candidates={len(candidates)} "
         f"skipped_modern={skipped_modern} explicit={len(explicit_ids)} apply={int(args.apply)} "
@@ -967,10 +985,8 @@ def main(argv=None):
                     "precision:" + str(case["new"]["technical_precision"] or "NONE")
                 ] += 1
 
-                if args.apply and case["safe_to_apply"]:
-                    _apply_case(base, key, case)
-                    counters["applied"] += 1
-
+                # Phase 1 is ALWAYS read-only: authorization must verify the
+                # full frozen plan SHA before we perform even the first write.
                 print(
                     f"[BACKFILL] {index}/{len(candidates)} pvp={pid} "
                     f"{case['old']['geocode_precision']} -> {case['new']['geocode_precision']} "
@@ -1010,6 +1026,12 @@ def main(argv=None):
             "old": x["old"],
             "new": x["new"],
             "safe_to_apply": x["safe_to_apply"],
+            "safe_reason": x["safe_reason"],
+            "input_source": x["input_source"],
+            "locations": [
+                {k: v for k, v in row.items() if k != "checked_at"}
+                for row in x["locations"]
+            ],
         }
         for x in cases
     ]
@@ -1021,6 +1043,33 @@ def main(argv=None):
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+    # Recheck the exact frozen plan before the first write. Incomplete
+    # previews or changes to parent/secondary data are NOT implicitly approved.
+    if args.apply:
+        if errors:
+            raise RuntimeError(
+                f"APPLY_ABORTED: {len(errors)} preflight errors; zero DB writes"
+            )
+        if plan_sha.lower() != args.expected_plan_sha.lower():
+            raise RuntimeError(
+                "APPLY_PLAN_SHA_MISMATCH: zero DB writes. Preview SHA="
+                + plan_sha + "; supplied=" + args.expected_plan_sha
+            )
+        print(
+            f"[BACKFILL APPLY] authorized={len(cases)} "
+            f"eligible={sum(bool(c['safe_to_apply']) for c in cases)} "
+            f"sha={plan_sha}",
+            flush=True,
+        )
+        for index, case in enumerate(cases, 1):
+            if not case["safe_to_apply"]:
+                continue
+            # Stop at the first failed apply; a failed rollback or concurrent
+            # edit must not be silently followed by more writes.
+            _apply_case(base, key, case)
+            counters["applied"] += 1
+            print(f"[BACKFILL APPLIED] {index}/{len(cases)} pvp={case['pvp_id']}", flush=True)
 
     summary = {
         "version": VERSION,
