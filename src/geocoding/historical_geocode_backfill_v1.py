@@ -121,6 +121,21 @@ def _patch(base, key, path, filters, payload):
     return _request_json(req)
 
 
+def _delete(base, key, path, filters):
+    url = base.rstrip("/") + "/rest/v1/" + path + "?" + urlencode(filters, safe="(),.*")
+    req = Request(
+        url,
+        method="DELETE",
+        headers={
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Accept": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    return _request_json(req)
+
+
 def _f(value):
     try:
         x = float(value)
@@ -536,8 +551,6 @@ def _apply_case(base, key, case):
         raise RuntimeError("Unable to snapshot parent listing")
     old_parent = old_parent_rows[0]
     old_locations = _fetch_locations_snapshot(base, key, listing_id)
-    if not old_locations:
-        raise RuntimeError("Unable to snapshot existing listing_locations")
 
     new_locations = case["locations"]
     _replace_locations(base, key, pid, new_locations, validate=True)
@@ -571,7 +584,10 @@ def _apply_case(base, key, case):
         rollback_errors = []
         if child_written:
             try:
-                _replace_locations(base, key, pid, old_locations, validate=False)
+                if old_locations:
+                    _replace_locations(base, key, pid, old_locations, validate=False)
+                else:
+                    _delete(base, key, "listing_locations", {"listing_id": "eq." + listing_id})
             except Exception as exc:
                 rollback_errors.append("locations=" + repr(exc))
         if parent_written:
