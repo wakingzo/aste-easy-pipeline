@@ -62,6 +62,32 @@ def valid_pair(lat,lon):
     la,lo=_f(lat),_f(lon)
     return la is not None and lo is not None and -90<=la<=90 and -180<=lo<=180 and not (la==0 and lo==0)
 
+def source_admin_matches_listing(listing, loc, boundary):
+    """Compare canonical municipalities of published parent and physical PVP bene.
+
+    Do not compare labels: historical names and aliases may differ while ISTAT
+    canonical municipality is identical. Returns (True|False|None, explanation).
+    """
+    parent_meta = boundary.resolve_admin(listing)
+    physical_meta = boundary.resolve_admin({
+        "comune": loc.get("comune_pvp"),
+        "provincia": loc.get("provincia_pvp"),
+        "sigla_provincia": loc.get("sigla_provincia_pvp"),
+    })
+    parent_code = str(parent_meta.get("canonical_code") or "")
+    physical_code = str(physical_meta.get("canonical_code") or "")
+    if parent_meta.get("status") != "RESOLVED" or not parent_code:
+        return None, "PARENT_ADMIN_NOT_CANONICAL"
+    if physical_meta.get("status") == "RESOLVED" and physical_code:
+        return parent_code == physical_code, (
+            "CANONICAL_ADMIN_MATCH" if parent_code == physical_code
+            else f"RAW_ADMIN_MISMATCH:{parent_code}!={physical_code}"
+        )
+    # If the raw municipality name could not be resolved, do not silently
+    # consider it identical just because the parcel has a municipality code.
+    return None, "RAW_ADMIN_NOT_CANONICAL"
+
+
 def published_confidence(pin, original_confidence):
     """A representative COMUNE pin is not evidence of a precise property location."""
     if str((pin or {}).get("precision") or "").upper() == "COMUNE":
