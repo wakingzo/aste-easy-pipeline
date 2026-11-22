@@ -234,3 +234,60 @@ def test_actual_google_core_parses_specific_rooftop_without_network():
     bad, reason = judge(_large_conflict(), {"comune": "Olbia"}, [wrong_civic], core, _FakeBoundary())
     assert bad is None
     assert reason == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def _eligible_rebaseline(**change):
+    from src.geocoding.historical_geocode_backfill_v2 import _safe_to_apply
+    case = dict(
+        input_source="RAW_PVP_HISTORICAL",
+        technical_precision="CIVICO",
+        original_status="RESOLVED",
+        location_count=1,
+        has_conflict=False,
+        old_pvp_inside=True,
+        new_pin_safe=True,
+    )
+    case.update(change)
+    return _safe_to_apply(**case)
+
+
+def test_rebaseline_does_not_consider_old_geocoder_precision():
+    assert _eligible_rebaseline() == (True, "RAW_REBASELINE_CIVICO")
+    assert _eligible_rebaseline(technical_precision="STRADA") == (True, "RAW_REBASELINE_STRADA")
+    assert _eligible_rebaseline(technical_precision="LOCALITA") == (True, "RAW_REBASELINE_LOCALITA")
+
+
+def test_rebaseline_blocks_synthetic_without_original_raw():
+    ok, why = _eligible_rebaseline(input_source="DB_SYNTHETIC")
+    assert not ok and why == "RAW_REQUIRED_BEFORE_APPLY"
+
+
+def test_rebaseline_blocks_multi_bene_before_overwriting_secondary_locations():
+    ok, why = _eligible_rebaseline(location_count=2)
+    assert not ok and why == "MULTI_BENE_NEEDS_PER_BENE_RESOLUTION"
+
+
+def test_rebaseline_blocks_unresolved_pvp_anncsu_conflict_even_if_legacy_precise():
+    ok, why = _eligible_rebaseline(
+        technical_precision="COMUNE", original_status="REVIEW",
+        has_conflict=True, old_pvp_inside=True,
+    )
+    assert not ok and why == "UNRESOLVED_NEW_GEOCODER_CONFLICT"
+
+
+def test_rebaseline_blocks_city_center_replacing_coherent_original_pvp():
+    ok, why = _eligible_rebaseline(
+        technical_precision="COMUNE", original_status="RESOLVED", old_pvp_inside=True,
+    )
+    assert not ok and why == "RAW_PVP_INSIDE_BUT_NEW_ONLY_COMUNE"
+
+
+def test_rebaseline_accepts_indicative_comune_without_coherent_pvp():
+    assert _eligible_rebaseline(
+        technical_precision="COMUNE", old_pvp_inside=False,
+    ) == (True, "RAW_REBASELINE_INDICATIVE_COMUNE")
+
+
+def test_rebaseline_blocks_new_pin_outside_canonical_comune():
+    ok, why = _eligible_rebaseline(new_pin_safe=False)
+    assert not ok and why == "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
