@@ -156,26 +156,28 @@ def test_large_conflict_disabled_performs_no_google_call():
     assert arb.summary()["counts"]["disabled_no_google"] == 1
 
 
-def test_google_strict_rooftop_near_anncsu_confirms_anncsu():
+def test_google_rooftop_near_anncsu_is_not_independent_proof():
     loc = _large_conflict()
     got, why = judge(loc, {"comune": "Olbia"}, [_google_result(40.0003)], _FakeGoogle(), _FakeBoundary())
-    assert why == "ANNCSU_CONFIRMED"
+    assert why == "ANNCSU_NOT_DECISIVE"
     assert got["source"] == "ANNCSU"
     assert got["precision"] == "CIVICO"
-    assert got["confidence"] == "HIGH"
-    assert got["status"] == "RESOLVED"
+    assert got["confidence"] == "MEDIUM"
+    assert got["status"] == "REVIEW"
+    assert got["google_status"] == "GOOGLE_NEAR_ANNCSU_NOT_DECISIVE"
     assert got["latitudine"] == loc["latitudine"]
 
 
-def test_google_strict_rooftop_near_pvp_confirms_pvp_without_civic_promotion():
+def test_google_rooftop_near_pvp_does_not_verify_property():
     loc = _large_conflict()
     got, why = judge(loc, {"comune": "Olbia"}, [_google_result(40.0202)], _FakeGoogle(), _FakeBoundary())
-    assert why == "PVP_CONFIRMED"
-    assert got["source"] == "PVP"
-    assert got["precision"] == "PVP_COORD"
-    assert got["status"] == "RESOLVED"
-    assert got["latitudine"] == loc["pvp_latitudine"]
-    assert got["confidence"] == "MEDIUM_HIGH"
+    assert why == "PVP_NOT_DECISIVE"
+    assert got["source"] == "ANNCSU"
+    assert got["precision"] == "CIVICO"
+    assert got["status"] == "REVIEW"
+    assert got["latitudine"] == loc["latitudine"]
+    assert got["confidence"] == "MEDIUM"
+    assert got["google_status"] == "GOOGLE_NEAR_PVP_NOT_DECISIVE"
 
 
 def test_google_partial_nonrooftop_or_wrong_civic_never_confirms():
@@ -244,7 +246,7 @@ def test_actual_google_core_parses_specific_rooftop_without_network():
     assert core.municipality_geo_matches(row, result)
     assert core.house_number_relation(core.expected_house_numbers(row), core.result_house_numbers(result)) == "exact"
     got, reason = judge(_large_conflict(), {"comune": "Olbia"}, [result], core, _FakeBoundary())
-    assert reason == "ANNCSU_CONFIRMED"
+    assert reason == "ANNCSU_NOT_DECISIVE"
     assert got["source"] == "ANNCSU"
     wrong_civic = {**result, "components": [
         {"long_name": "41", "short_name": "41", "types": ["street_number"]},
