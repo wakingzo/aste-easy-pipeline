@@ -38,13 +38,36 @@ def _write_atomic(path, obj):
 def _run(args, *, report):
     cmd = [sys.executable, str(BACKFILL), *args]
     started = time.monotonic()
-    print("[AUTO] " + " ".join(cmd[2:]).replace("--expected-plan-sha", "--expected-plan-sha"), flush=True)
-    run = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    if run.returncode:
-        print("[AUTO ERROR] Child process failed; all subsequent batches STOPPED.", file=sys.stderr)
-        print((run.stdout or "")[-6500:], file=sys.stderr)
-        print((run.stderr or "")[-6500:], file=sys.stderr)
-        raise RuntimeError("Historical backfill command failed (exit " + str(run.returncode) + ")")
+    print("[AUTO] " + " ".join(cmd[2:]), flush=True)
+    # Show progress rather than suppressing the whole child output for many
+    # minutes. Keep only a bounded tail for error diagnosis.
+    from collections import deque
+    import re
+    tail = deque(maxlen=60)
+    with subprocess.Popen(
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1, errors="replace",
+    ) as proc:
+        for line in proc.stdout:
+            line = line.rstrip("\r\n")
+            tail.append(line)
+            applied = re.search(r"^\\[BACKFILL APPLIED\\] (\\d+)/(\\d+) pvp=(\\d+)", line)
+            preview = re.search(r"^\\[BACKFILL\\] (\\d+)/(\\d+) pvp=(\\d+)", line)
+            if applied:
+                i, total = int(applied.group(1)), int(applied.group(2))
+                if i == 1 or i % 10 == 0 or i == total:
+                    print(f"[AUTO APPLY] {i}/{total} saved & verified", flush=True)
+            elif preview:
+                i, total = int(preview.group(1)), int(preview.group(2))
+                if i == 1 or i % 25 == 0 or i == total:
+                    print(f"[AUTO PREVIEW] {i}/{total} processed", flush=True)
+            elif line.startswith(("[BACKFILL ERROR]", "Traceback", "RuntimeError:")):
+                print(line, flush=True)
+        rc = proc.wait()
+    if rc:
+        print("[AUTO ERROR] Child process failed; later batches STOPPED.", file=sys.stderr)
+        print("\n".join(tail)[-6500:], file=sys.stderr)
+        raise RuntimeError("Historical backfill command failed (exit " + str(rc) + ")")
     if not report.is_file():
         raise RuntimeError("Expected report missing: " + str(report))
     obj = _read(report)
