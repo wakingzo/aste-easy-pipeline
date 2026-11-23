@@ -563,3 +563,59 @@ def test_unattended_batch_checks_write_counts_and_exact_sha():
         assert "DB write" in str(exc)
     else:
         assert False, "Mismatched write count must stop batch processing"
+
+
+
+def test_server_side_pvp_cursor_reduces_full_history_fetch():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    old = h._all
+    seen = []
+    try:
+        def fake_all(base, key, table, params):
+            seen.append((table, dict(params)))
+            return []
+        h._all = fake_all
+        assert h._fetch_active_listings("", "", [], after_pvp_id="4638836") == []
+        assert seen[-1][1]["pvp_id"] == "gt.4638836"
+        h._fetch_active_listings("", "", ["4638837"], after_pvp_id="4638836")
+        assert seen[-1][1]["pvp_id"] == "in.(4638837)"
+    finally:
+        h._all = old
+
+
+def test_bounded_parallel_apply_uses_same_verified_single_auction_path():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    import threading
+    barrier = threading.Barrier(3)
+    processed = []
+    old = h._apply_case
+    try:
+        def fake_apply(base, key, case):
+            barrier.wait(timeout=3)
+            processed.append(case["pvp_id"])
+            return {"status": "PASS"}
+        h._apply_case = fake_apply
+        safe = [
+            {"pvp_id": str(i), "safe_to_apply": True} for i in range(3)
+        ]
+        safe.append({"pvp_id": "blocked", "safe_to_apply": False})
+        successes = []
+        h._apply_cases_bounded("", "", safe, 3, lambda i, case: successes.append(case["pvp_id"]))
+        assert set(processed) == {"0", "1", "2"}
+        assert set(successes) == set(processed)
+        assert "blocked" not in successes
+    finally:
+        h._apply_case = old
+
+
+def test_parallel_apply_rejects_duplicate_auction_ids():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    try:
+        h._apply_cases_bounded("", "", [
+            {"pvp_id": "42", "safe_to_apply": True},
+            {"pvp_id": "42", "safe_to_apply": True},
+        ], 3, lambda i, case: None)
+    except RuntimeError as exc:
+        assert "Duplicate PVP" in str(exc)
+    else:
+        assert False, "Duplicate listing must not be written in parallel"
