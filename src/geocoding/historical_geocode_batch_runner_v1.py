@@ -51,8 +51,8 @@ def _run(args, *, report):
         for line in proc.stdout:
             line = line.rstrip("\r\n")
             tail.append(line)
-            applied = re.search(r"^\\[BACKFILL APPLIED\\] (\\d+)/(\\d+) pvp=(\\d+)", line)
-            preview = re.search(r"^\\[BACKFILL\\] (\\d+)/(\\d+) pvp=(\\d+)", line)
+            applied = re.search(r"^\[BACKFILL APPLIED\] (\d+)/(\d+) pvp=(\d+)", line)
+            preview = re.search(r"^\[BACKFILL\] (\d+)/(\d+) pvp=(\d+)", line)
             if applied:
                 i, total = int(applied.group(1)), int(applied.group(2))
                 if i == 1 or i % 10 == 0 or i == total:
