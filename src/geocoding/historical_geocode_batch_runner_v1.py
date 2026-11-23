@@ -93,6 +93,7 @@ def verify_apply(obj, preview, *, expected_applied):
 def main(argv=None):
     p = argparse.ArgumentParser(description="Finish all remaining RAW historical backfill batches unattended")
     p.add_argument("--batch-size", type=int, default=100)
+    p.add_argument("--workers", type=int, default=3, help="Parallel independent Supabase writes (1..4)")
     p.add_argument("--max-batches", type=int, default=0, help="0 = until all original RAW candidates scanned")
     p.add_argument("--state-file", type=Path, default=STATE)
     args = p.parse_args(argv)
@@ -100,6 +101,8 @@ def main(argv=None):
         p.error("--batch-size must be 1..250")
     if args.max_batches < 0:
         p.error("--max-batches cannot be negative")
+    if not 1 <= args.workers <= 4:
+        p.error("--workers must be 1..4")
     args.state_file.parent.mkdir(parents=True, exist_ok=True)
 
     progress = _read(args.state_file) if args.state_file.exists() else {
@@ -154,7 +157,8 @@ def main(argv=None):
 
         if safe:
             apply_result = _run(
-                [*apply_args, "--apply", "--expected-plan-sha", planned_apply["plan_sha256"]],
+                [*apply_args, "--apply", "--apply-workers", str(args.workers),
+                 "--expected-plan-sha", planned_apply["plan_sha256"]],
                 report=APPLY,
             )
             verify_apply(apply_result, planned_apply, expected_applied=len(safe))
