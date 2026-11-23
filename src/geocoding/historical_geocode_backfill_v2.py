@@ -231,7 +231,7 @@ def _parse_ids(raw):
     return out
 
 
-def _fetch_active_listings(base, key, explicit_ids):
+def _fetch_active_listings(base, key, explicit_ids, after_pvp_id=""):
     today = datetime.now().astimezone().date().isoformat()
     params = {
         "select": (
@@ -245,6 +245,11 @@ def _fetch_active_listings(base, key, explicit_ids):
     }
     if explicit_ids:
         params["pvp_id"] = "in.(" + ",".join(explicit_ids) + ")"
+    elif after_pvp_id:
+        # PVP ID is TEXT in DB. Use the same lexical comparison as the
+        # existing deterministic batch cursor, but filter on the server:
+        # eliminates re-downloading tens of thousands of earlier listings.
+        params["pvp_id"] = "gt." + str(after_pvp_id)
     return _all(base, key, "listings", params)
 
 
@@ -295,8 +300,8 @@ def _sanitize_locations_for_rpc(rows):
     return out
 
 
-def _build_candidates(base, key, explicit_ids, limit):
-    listings = _fetch_active_listings(base, key, explicit_ids)
+def _build_candidates(base, key, explicit_ids, limit, after_pvp_id=""):
+    listings = _fetch_active_listings(base, key, explicit_ids, after_pvp_id)
     ids = [str(x.get("pvp_id") or "") for x in listings if x.get("pvp_id")]
     meta = _fetch_primary_location_meta(base, key, ids)
     candidates = []
@@ -1002,7 +1007,7 @@ def main(argv=None):
     # Collect RAW coverage before applying the batch limit, so a batch of 50
     # means 50 RAW auctions, not 50 legacy rows with mostly synthetic input.
     all_active, candidates, skipped_modern = _build_candidates(
-        base, key, explicit_ids, 0
+        base, key, explicit_ids, 0, args.after_pvp_id
     )
     wanted_ids = [str(x.get("pvp_id") or "") for x in candidates]
     raw_index, raw_stats = _load_raw_index(args.raw_file, wanted_ids)
