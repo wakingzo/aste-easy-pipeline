@@ -62,6 +62,85 @@ def valid_pair(lat,lon):
     la,lo=_f(lat),_f(lon)
     return la is not None and lo is not None and -90<=la<=90 and -180<=lo<=180 and not (la==0 and lo==0)
 
+def source_admin_matches_listing(listing, loc, boundary):
+    """Compare canonical municipalities of published parent and physical PVP bene.
+
+    Do not compare labels: historical names and aliases may differ while ISTAT
+    canonical municipality is identical. Returns (True|False|None, explanation).
+    """
+    parent_meta = boundary.resolve_admin(listing)
+    physical_meta = boundary.resolve_admin({
+        "comune": loc.get("comune_pvp"),
+        "provincia": loc.get("provincia_pvp"),
+        "sigla_provincia": loc.get("sigla_provincia_pvp"),
+        "regione": listing.get("regione"),
+    })
+    parent_code = str(parent_meta.get("canonical_code") or "")
+    physical_code = str(physical_meta.get("canonical_code") or "")
+    if parent_meta.get("status") != "RESOLVED" or not parent_code:
+        return None, "PARENT_ADMIN_NOT_CANONICAL"
+    if physical_meta.get("status") == "RESOLVED" and physical_code:
+        return parent_code == physical_code, (
+            "CANONICAL_ADMIN_MATCH" if parent_code == physical_code
+            else f"RAW_ADMIN_MISMATCH:{parent_code}!={physical_code}"
+        )
+    # If the raw municipality name could not be resolved, do not silently
+    # consider it identical just because the parcel has a municipality code.
+    return None, "RAW_ADMIN_NOT_CANONICAL"
+
+
+def guard_pin_for_listing(pin, listing, loc, boundary):
+    """Validate EVERY proposed pin (including ANNCSU, ISTAT, and fallback).
+
+    Returns a conservative listing-municipality indicator if a candidate lies
+    outside the canonical listing commune or the physical bene has a different
+    canonical commune. Never publishes a misplaced point as CIVICO/PVP_COORD.
+    """
+    same_admin, admin_reason = source_admin_matches_listing(
+        listing, loc, boundary
+    )
+    position = boundary.test(
+        listing, lat=pin.get("lat"), lon=pin.get("lon")
+    )
+    if same_admin is True and position.get("safe") is True:
+        return pin, "PASS"
+
+    reason = (
+        "RAW_ADMIN_CONFLICT" if same_admin is False else
+        "RAW_ADMIN_UNRESOLVED" if same_admin is None else
+        "PIN_OUTSIDE_LISTING_COMUNE"
+    )
+    rep = boundary.representative_point(listing)
+    if not rep.get("ok"):
+        raise RuntimeError(
+            f"UNSAFE_PIN_NO_FALLBACK reason={reason} "
+            f"raw_admin={admin_reason} boundary={position.get('position')} "
+            f"fallback={rep.get('reason')}"
+        )
+    safe = {
+        "lat": rep["lat"],
+        "lon": rep["lon"],
+        "source": "istat_boundary_comune_indicativo",
+        "precision": "COMUNE",
+        "status": "DONE",
+        "reason": (
+            "Posizione indicativa nel comune della scheda, non ubicazione "
+            "dell'immobile: candidato scartato dal controllo territoriale "
+            f"({reason}; {admin_reason}; {position.get('position')})."
+        ),
+        "formatted_address": "Comune di " + str(listing.get("comune") or ""),
+        "fallback_from_status": reason,
+    }
+    return safe, reason
+
+
+def published_confidence(pin, original_confidence):
+    """A representative COMUNE pin is not evidence of a precise property location."""
+    if str((pin or {}).get("precision") or "").upper() == "COMUNE":
+        return "NONE"
+    return original_confidence
+
+
 def maps_link(lat,lon):
     return "https://www.google.com/maps?q="+quote(f"{float(lat):.8f},{float(lon):.8f}")
 

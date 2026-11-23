@@ -1,0 +1,621 @@
+"""Regression guards for the active v4 offline geocoder and historical backfill.
+
+All tests are pure and require no database, ANNCSU index, Google calls, or
+Supabase connection.
+"""
+
+from src.geocoding.unified_offline_v1 import choose
+from src.geocoding.primary_pin_publisher_v2_preview import published_confidence
+from src.geocoding.google_civic_arbitration_v1 import eligible, judge, ConflictArbitrator
+
+
+def _civic_case(*, pvp_lat=40.0, with_pvp=True):
+    res = {
+        "primary": {
+            "coord_valid": with_pvp,
+            "lat_pvp": pvp_lat if with_pvp else None,
+            "lon_pvp": 9.0 if with_pvp else None,
+        }
+    }
+    ann = {
+        "anncsu": {
+            "status": "MATCH_EXACT",
+            "best": {"odonimo": "VIA ROMA"},
+            "civic": {"status": "CIVIC_COORD", "lat": 40.0, "lon": 9.0},
+        }
+    }
+    return choose(res, ann, {"match": {"status": "NO_HINT"}})
+
+
+def test_close_pvp_anncsu_agreement_retains_exact_civic():
+    result = _civic_case(pvp_lat=40.001)  # approx 111 m
+    assert result["final"]["source"] == "ANNCSU"
+    assert result["final"]["precision"] == "CIVICO"
+    assert result["final"]["status"] == "RESOLVED"
+    assert "PVP_ANNCSU_CIVIC_CONFLICT" not in result["warnings"]
+
+
+def test_300m_not_a_large_pvp_anncsu_conflict():
+    result = _civic_case(pvp_lat=40.003)  # approx 334 m
+    assert result["final"]["source"] == "ANNCSU"
+    assert result["final"]["status"] == "RESOLVED"
+    assert result["final"]["confidence"] == "HIGH"
+    assert "PVP_ANNCSU_CIVIC_CONFLICT" not in result["warnings"]
+
+
+def test_far_pvp_anncsu_disagreement_still_requires_review():
+    result = _civic_case(pvp_lat=40.014)  # approx 1.56 km
+    assert result["final"]["status"] == "REVIEW"
+    assert "PVP_ANNCSU_CIVIC_CONFLICT" in result["warnings"]
+
+
+def test_no_pvp_coordinate_does_not_veto_anncsu_civic():
+    result = _civic_case(with_pvp=False)
+    assert result["final"]["status"] == "RESOLVED"
+    assert result["final"]["precision"] == "CIVICO"
+
+
+def test_municipal_map_fallback_never_inherits_high_confidence():
+    assert published_confidence({"precision": "COMUNE"}, "HIGH") == "NONE"
+    assert published_confidence({"precision": "COMUNE"}, "MEDIUM") == "NONE"
+    assert published_confidence({"precision": "COMUNE"}, None) == "NONE"
+
+
+def test_precise_non_fallback_retains_original_confidence():
+    assert published_confidence({"precision": "CIVICO"}, "HIGH") == "HIGH"
+    assert published_confidence({"precision": "PVP_COORD"}, "MEDIUM") == "MEDIUM"
+
+
+def _large_conflict():
+    return {
+        "pvp_id": "TEST", "is_primary": True, "source": "ANNCSU",
+        "precision": "CIVICO", "status": "REVIEW", "confidence": "MEDIUM",
+        "anncsu_status": "MATCH_EXACT",
+        "warnings": ["PVP_ANNCSU_CIVIC_CONFLICT"],
+        "street": "Via Roma", "civic": "40", "comune_pvp": "Olbia",
+        "sigla_provincia_pvp": "SS", "cap_pvp": "07026",
+        "latitudine": 40.0, "longitudine": 9.0,
+        "pvp_latitudine": 40.02, "pvp_longitudine": 9.0,
+    }
+
+
+class _FakeGoogle:
+    @staticmethod
+    def expected_house_numbers(row):
+        assert row["indirizzo"] == "Via Roma 40"
+        return {"40"}
+
+    @staticmethod
+    def municipality_geo_matches(row, result):
+        return result.get("comune_ok", True)
+
+    @staticmethod
+    def house_number_relation(expected, got):
+        return "exact" if expected == got else "mismatch"
+
+    @staticmethod
+    def result_house_numbers(result):
+        return {"40"} if result.get("civic_ok", True) else {"41"}
+
+    @staticmethod
+    def best_address_match(row, result):
+        return result.get("address_match", .99)
+
+    @staticmethod
+    def score_forward_candidate(row, result):
+        return {"score": result.get("score", 99)}
+
+
+class _FakeBoundary:
+    @staticmethod
+    def resolve_admin(row):
+        canonical = {
+            "Olbia": "090047", "Lentini": "089011",
+            "Siracusa": "089017", "Borgosesia": "002016",
+            "Vercelli": "002158", "Popoli Terme": "068033",
+            "Popoli": "068033",
+        }
+        comune = row.get("comune") or ""
+        code = canonical.get(comune)
+        return {
+            "status": "RESOLVED" if code else "UNRESOLVED",
+            "canonical_code": code,
+        }
+
+    @staticmethod
+    def representative_point(row):
+        return {"ok": True, "lat": 40.1, "lon": 9.1}
+
+    @staticmethod
+    def test(row, *, lat, lon):
+        if lat > 41:
+            return {"position": "OUTSIDE", "safe": False}
+        return {"position": "INSIDE", "safe": True}
+
+
+def _google_result(lat, **kwargs):
+    return {
+        "ok": True, "lat": lat, "lon": 9.0,
+        "location_type": "ROOFTOP", "partial_match": False,
+        **kwargs,
+    }
+
+
+def test_large_conflict_eligible_single_bene_only():
+    assert eligible(_large_conflict()) == (True, "ELIGIBLE")
+    assert eligible(_large_conflict(), number_of_beni=2)[0] is False
+    assert eligible({**_large_conflict(), "street": ""})[0] is False
+
+
+def test_large_conflict_disabled_performs_no_google_call():
+    loc = _large_conflict()
+    arb = ConflictArbitrator(max_http=0)
+    got = arb.resolve(loc, 1, {"comune": "Olbia"}, _FakeBoundary())
+    assert got is loc
+    assert arb.summary()["network_attempts"] == 0
+    assert arb.summary()["counts"]["disabled_no_google"] == 1
+
+
+def test_google_rooftop_near_anncsu_is_not_independent_proof():
+    loc = _large_conflict()
+    got, why = judge(loc, {"comune": "Olbia"}, [_google_result(40.0003)], _FakeGoogle(), _FakeBoundary())
+    assert why == "ANNCSU_NOT_DECISIVE"
+    assert got["source"] == "ANNCSU"
+    assert got["precision"] == "CIVICO"
+    assert got["confidence"] == "MEDIUM"
+    assert got["status"] == "REVIEW"
+    assert got["google_status"] == "GOOGLE_NEAR_ANNCSU_NOT_DECISIVE"
+    assert got["latitudine"] == loc["latitudine"]
+
+
+def test_google_rooftop_near_pvp_does_not_verify_property():
+    loc = _large_conflict()
+    got, why = judge(loc, {"comune": "Olbia"}, [_google_result(40.0202)], _FakeGoogle(), _FakeBoundary())
+    assert why == "PVP_NOT_DECISIVE"
+    assert got["source"] == "ANNCSU"
+    assert got["precision"] == "CIVICO"
+    assert got["status"] == "REVIEW"
+    assert got["latitudine"] == loc["latitudine"]
+    assert got["confidence"] == "MEDIUM"
+    assert got["google_status"] == "GOOGLE_NEAR_PVP_NOT_DECISIVE"
+
+
+def test_google_partial_nonrooftop_or_wrong_civic_never_confirms():
+    bad = [
+        _google_result(40.0002, partial_match=True),
+        _google_result(40.0002, location_type="GEOMETRIC_CENTER"),
+        _google_result(40.0002, civic_ok=False),
+        _google_result(40.0002, comune_ok=False),
+        _google_result(40.0002, address_match=.50),
+    ]
+    for candidate in bad:
+        got, why = judge(_large_conflict(), {"comune": "Olbia"}, [candidate], _FakeGoogle(), _FakeBoundary())
+        assert got is None
+        assert why == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def test_google_near_neither_candidate_never_confirms():
+    got, why = judge(
+        _large_conflict(), {"comune": "Olbia"},
+        [_google_result(40.0100)], _FakeGoogle(), _FakeBoundary()
+    )
+    assert got is None
+    assert why == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def test_google_ambiguous_two_rooftops_cannot_arbitrate():
+    got, why = judge(
+        _large_conflict(), {"comune": "Olbia"},
+        [_google_result(40.0001), _google_result(40.0201)],
+        _FakeGoogle(), _FakeBoundary()
+    )
+    assert got is None
+    assert why == "CONTRADICTORY_GOOGLE_RESULTS"
+
+
+def test_arbitration_rejects_any_outside_google_point():
+    got, why = judge(
+        _large_conflict(), {"comune": "Olbia"},
+        [_google_result(41.6)], _FakeGoogle(), _FakeBoundary()
+    )
+    assert got is None
+    assert why == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def test_actual_google_core_parses_specific_rooftop_without_network():
+    # Exercise the real v9.3.6 address/civic/municipality score functions, not
+    # just fake predicates. Importing the core does not invoke an API request.
+    from src.geocoding import google_geocode_core_v9_3_6 as core
+    row = {"indirizzo": "Via Roma 40", "comune": "Olbia", "cap": "07026", "sigla_provincia": "SS"}
+    assert core.constrained_address_variants(row)[0] == "Via Roma 40"
+    assert core.expected_house_numbers(row) == {"40"}
+    result = {
+        "ok": True, "partial_match": False, "lat": 40.0002, "lon": 9.0,
+        "location_type": "ROOFTOP",
+        "formatted_address": "Via Roma, 40, 07026 Olbia SS, Italia",
+        "types": ["street_address"],
+        "components": [
+            {"long_name": "40", "short_name": "40", "types": ["street_number"]},
+            {"long_name": "Via Roma", "short_name": "Via Roma", "types": ["route"]},
+            {"long_name": "Olbia", "short_name": "Olbia", "types": ["locality"]},
+            {"long_name": "Sassari", "short_name": "SS", "types": ["administrative_area_level_2"]},
+            {"long_name": "07026", "short_name": "07026", "types": ["postal_code"]},
+            {"long_name": "Italia", "short_name": "IT", "types": ["country"]},
+        ],
+    }
+    assert core.municipality_geo_matches(row, result)
+    assert core.house_number_relation(core.expected_house_numbers(row), core.result_house_numbers(result)) == "exact"
+    got, reason = judge(_large_conflict(), {"comune": "Olbia"}, [result], core, _FakeBoundary())
+    assert reason == "ANNCSU_NOT_DECISIVE"
+    assert got["source"] == "ANNCSU"
+    wrong_civic = {**result, "components": [
+        {"long_name": "41", "short_name": "41", "types": ["street_number"]},
+        *result["components"][1:],
+    ]}
+    bad, reason = judge(_large_conflict(), {"comune": "Olbia"}, [wrong_civic], core, _FakeBoundary())
+    assert bad is None
+    assert reason == "NO_STRICT_GOOGLE_AGREEMENT"
+
+
+def _eligible_rebaseline(**change):
+    from src.geocoding.historical_geocode_backfill_v2 import _safe_to_apply
+    case = dict(
+        input_source="RAW_PVP_HISTORICAL",
+        technical_precision="CIVICO",
+        original_status="RESOLVED",
+        location_count=1,
+        has_conflict=False,
+        old_pvp_inside=True,
+        new_pin_safe=True,
+    )
+    case.update(change)
+    return _safe_to_apply(**case)
+
+
+def test_rebaseline_does_not_consider_old_geocoder_precision():
+    assert _eligible_rebaseline() == (True, "RAW_REBASELINE_CIVICO")
+    assert _eligible_rebaseline(technical_precision="STRADA") == (True, "RAW_REBASELINE_STRADA")
+    assert _eligible_rebaseline(technical_precision="LOCALITA") == (True, "RAW_REBASELINE_LOCALITA")
+
+
+def test_rebaseline_blocks_synthetic_without_original_raw():
+    ok, why = _eligible_rebaseline(input_source="DB_SYNTHETIC")
+    assert not ok and why == "RAW_REQUIRED_BEFORE_APPLY"
+
+
+def test_rebaseline_allows_complete_multi_bene_without_extra_pins():
+    ok, why = _eligible_rebaseline(location_count=2)
+    assert ok and why == "RAW_REBASELINE_CIVICO"
+
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    original = [
+        {"pvp_id":"1","bene_index":0,"is_primary":True,
+         "address_raw":"Via Roma 10","comune_pvp":"Roma","status":"RESOLVED"},
+        {"pvp_id":"1","bene_index":1,"is_primary":False,
+         "address_raw":"Via Milano 15","comune_pvp":"Roma","status":"PENDING"},
+    ]
+    merged = _merge_stored_secondary_locations(original, [])
+    assert len(merged)==2
+    assert sum(x["is_primary"] is True for x in merged)==1
+    assert merged[0]["address_raw"] == "Via Roma 10"
+    assert merged[1]["address_raw"] == "Via Milano 15"
+    assert merged[1]["status"] == "PENDING"
+
+
+def test_rebaseline_blocks_unresolved_pvp_anncsu_conflict_even_if_legacy_precise():
+    ok, why = _eligible_rebaseline(
+        technical_precision="COMUNE", original_status="REVIEW",
+        has_conflict=True, old_pvp_inside=True,
+    )
+    assert not ok and why == "UNRESOLVED_NEW_GEOCODER_CONFLICT"
+
+
+def test_rebaseline_blocks_city_center_replacing_coherent_original_pvp():
+    ok, why = _eligible_rebaseline(
+        technical_precision="COMUNE", original_status="RESOLVED", old_pvp_inside=True,
+    )
+    assert not ok and why == "RAW_PVP_INSIDE_BUT_NEW_ONLY_COMUNE"
+
+
+def test_rebaseline_accepts_indicative_comune_without_coherent_pvp():
+    assert _eligible_rebaseline(
+        technical_precision="COMUNE", old_pvp_inside=False,
+    ) == (True, "RAW_REBASELINE_INDICATIVE_COMUNE")
+
+
+def test_rebaseline_blocks_new_pin_outside_canonical_comune():
+    ok, why = _eligible_rebaseline(new_pin_safe=False)
+    assert not ok and why == "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
+
+
+def test_real_admin_alias_compares_canonical_codes_not_names():
+    from src.geocoding.primary_pin_publisher_v2_preview import source_admin_matches_listing
+    listing = {"comune": "Popoli Terme"}
+    loc = {"comune_pvp": "Popoli"}
+    assert source_admin_matches_listing(listing, loc, _FakeBoundary())[0] is True
+
+
+def test_real_admin_conflicts_are_not_trusted_even_if_pin_in_listing_comune():
+    from src.geocoding.primary_pin_publisher_v2_preview import (
+        source_admin_matches_listing, guard_pin_for_listing
+    )
+    listing = {"comune": "Lentini"}
+    loc = {"comune_pvp": "Siracusa"}
+    match, why = source_admin_matches_listing(listing, loc, _FakeBoundary())
+    assert match is False and why.startswith("RAW_ADMIN_MISMATCH:")
+    pin = {"lat": 40., "lon": 9., "precision": "CIVICO", "source": "ANNCSU"}
+    fallback, reason = guard_pin_for_listing(pin, listing, loc, _FakeBoundary())
+    assert reason == "RAW_ADMIN_CONFLICT"
+    assert fallback["precision"] == "COMUNE"
+    assert fallback["source"] == "istat_boundary_comune_indicativo"
+    assert fallback["formatted_address"] == "Comune di Lentini"
+
+
+def test_any_civic_outside_listing_municipality_is_downgraded():
+    from src.geocoding.primary_pin_publisher_v2_preview import guard_pin_for_listing
+    listing = {"comune": "Olbia"}
+    loc = {"comune_pvp": "Olbia"}
+    pin = {"lat": 41.5, "lon": 9., "source": "ANNCSU", "precision": "CIVICO"}
+    fallback, reason = guard_pin_for_listing(pin, listing, loc, _FakeBoundary())
+    assert reason == "PIN_OUTSIDE_LISTING_COMUNE"
+    assert fallback["precision"] == "COMUNE"
+
+
+def test_raw_admin_conflict_cannot_be_applied_in_historical_rebaseline():
+    ok, why = _eligible_rebaseline(admin_matches=False)
+    assert not ok and why == "RAW_SOURCE_COMUNE_CONFLICT"
+
+
+def test_siracusa_google_rooftop_near_pvp_is_not_proof_of_property():
+    # Actual Via Elorina 117 case: Google near PVP, perizia elsewhere.
+    # No PDF processing in production: this is solely a regression example.
+    loc = {
+        **_large_conflict(),
+        "street": "Via Elorina", "civic": "117",
+        "comune_pvp": "Siracusa", "sigla_provincia_pvp": "SR",
+        "cap_pvp": "96100",
+        "pvp_latitudine": 37.0665861, "pvp_longitudine": 15.2823994,
+        "latitudine": 37.0235556, "longitudine": 15.2590278,
+    }
+    candidate = {**_google_result(37.066649), "lon": 15.2823994}
+
+    class SiracusaGoogle(_FakeGoogle):
+        @staticmethod
+        def expected_house_numbers(row):
+            assert row["indirizzo"] == "Via Elorina 117"
+            return {"117"}
+
+        @staticmethod
+        def result_house_numbers(result):
+            return {"117"}
+
+    changed, outcome = judge(
+        loc, {"comune": "Siracusa"}, [candidate], SiracusaGoogle(), _FakeBoundary()
+    )
+    assert outcome == "PVP_NOT_DECISIVE"
+    assert changed["status"] == "REVIEW"
+    assert changed["latitudine"] == loc["latitudine"]
+    assert changed["longitudine"] == loc["longitudine"]
+    assert changed["google_status"] == "GOOGLE_NEAR_PVP_NOT_DECISIVE"
+
+
+def test_multibene_secondary_saved_raw_metadata_is_preserved_when_new_missing():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh = [
+        {"bene_index":0, "is_primary":True, "address_raw":"Via Nuova 1"},
+        {"bene_index":1, "is_primary":False, "address_raw":None,
+         "comune_pvp":"Roma", "pvp_latitudine":None, "pvp_longitudine":None,
+         "status":"PENDING", "warnings":[]},
+    ]
+    saved = [
+        {"bene_index":0,"is_primary":True, "address_raw":"Via Nuova 1"},
+        {"bene_index":1,"is_primary":False, "address_raw":"Via Conservata 3",
+         "pvp_latitudine":41.9, "pvp_longitudine":12.5,
+         "status":"PENDING"},
+    ]
+    new = _merge_stored_secondary_locations(fresh, saved)
+    assert new[1]["address_raw"] == "Via Conservata 3"
+    assert new[1]["pvp_latitudine"] == 41.9
+    assert new[1]["pvp_longitudine"] == 12.5
+    assert new[1]["status"] == "PENDING"
+    assert "HISTORICAL_SECONDARY_DATA_PRESERVED" in new[1]["warnings"]
+
+
+def test_multibene_existing_secondary_final_pin_is_not_erased():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh = [
+        {"bene_index":0, "is_primary":True},
+        {"bene_index":1, "is_primary":False, "address_raw":"Via Roma 4",
+         "comune_pvp":"Roma", "status":"PENDING", "warnings":[]},
+    ]
+    saved = [
+        {"bene_index":0,"is_primary":True},
+        {"bene_index":1,"is_primary":False, "address_raw":"Via Roma 4",
+         "comune_pvp":"Roma", "latitudine":41.89,"longitudine":12.49,
+         "source":"ANNCSU","precision":"CIVICO","confidence":"HIGH",
+         "status":"RESOLVED","warnings":["OLD_REVIEWED"]},
+    ]
+    new = _merge_stored_secondary_locations(fresh, saved)
+    assert new[1]["latitudine"] == 41.89
+    assert new[1]["source"] == "ANNCSU"
+    assert new[1]["status"] == "RESOLVED"
+    assert "OLD_REVIEWED" in new[1]["warnings"]
+
+
+def test_multibene_unmapped_stored_bene_index_is_blocked():
+    from src.geocoding.historical_geocode_backfill_v2 import _merge_stored_secondary_locations
+    fresh=[{"bene_index":0,"is_primary":True}]
+    stored=[{"bene_index":0,"is_primary":True},
+            {"bene_index":9,"is_primary":False,"address_raw":"Unmapped"}]
+    try:
+        _merge_stored_secondary_locations(fresh, stored)
+    except RuntimeError as exc:
+        assert "missing in RAW" in str(exc)
+    else:
+        assert False, "Expected unreconcilable secondary to be rejected"
+
+
+def test_backfill_post_apply_verifies_every_secondary_address_and_coordinate():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    expected = {
+        "pvp_id": "555", "new": {
+            "latitudine": 40., "longitudine": 9.,
+            "geocode_precision": "PRECISA",
+        },
+        "locations": [
+            {"pvp_id":"555","bene_index":0,"is_primary":True,
+             "latitudine":40.,"longitudine":9.,
+             "pvp_latitudine":40.,"pvp_longitudine":9.,
+             "address_raw":"Via Principale 1","comune_pvp":"Olbia",
+             "source":"ANNCSU","precision":"CIVICO",
+             "status":"RESOLVED","resolver_version":"unified_offline_v1"},
+            {"pvp_id":"555","bene_index":1,"is_primary":False,
+             "latitudine":None,"longitudine":None,
+             "pvp_latitudine":40.02,"pvp_longitudine":9.02,
+             "address_raw":"Via Secondaria 8","comune_pvp":"Olbia",
+             "source":None,"precision":None,
+             "status":"PENDING","resolver_version":"listing_locations_materializer_v1"},
+        ],
+    }
+    parent = {
+        "pvp_id":"555","latitudine":40.,"longitudine":9.,
+        "geocode_precision":"PRECISA",
+    }
+    secondaries = [dict(x) for x in expected["locations"]]
+    original_get = h._get
+    def patched_get(base, key, table, params):
+        if table == "listings":
+            return [parent]
+        if table == "listing_locations":
+            return secondaries
+        raise AssertionError("unexpected table")
+    try:
+        h._get = patched_get
+        assert h._verify_case("", "", expected) == (True, "PASS")
+        secondaries[1]["address_raw"] = "Via Persa 99"
+        good, why = h._verify_case("", "", expected)
+        assert not good and "address_raw mismatch bene_index=1" in why
+        secondaries[1]["address_raw"] = "Via Secondaria 8"
+        secondaries[1]["pvp_latitudine"] = 45.
+        good, why = h._verify_case("", "", expected)
+        assert not good and "pvp_coordinates mismatch bene_index=1" in why
+    finally:
+        h._get = original_get
+
+
+def _sample_batch_preview(*, errors=None):
+    from copy import deepcopy
+    return {
+        "mode": "PREVIEW_ZERO_DB_WRITES",
+        "db_writes": 0, "google_calls": 0,
+        "eligible_candidates": 3,
+        "batch_last_pvp_id": "200",
+        "plan_sha256": "a" * 64,
+        "raw_stats": {"raw_file_present": True, "selected_raw_batch": 3},
+        "cases": [
+            {"pvp_id": "100", "input_source": "RAW_PVP_HISTORICAL", "safe_to_apply": True},
+            {"pvp_id": "150", "input_source": "RAW_PVP_HISTORICAL", "safe_to_apply": False},
+        ],
+        "errors": [{"pvp_id": "200", "error": "Missing admin data"}],
+    }
+
+
+def test_unattended_batch_preview_can_skip_individual_errors():
+    from src.geocoding.historical_geocode_batch_runner_v1 import validate_preview
+    p = _sample_batch_preview()
+    assert validate_preview(p, batch_size=100) == ["100"]
+
+
+def test_unattended_batch_rejects_nonraw_inputs_and_incomplete_counts():
+    from src.geocoding.historical_geocode_batch_runner_v1 import validate_preview
+    p = _sample_batch_preview()
+    p["cases"][0]["input_source"] = "DB_SYNTHETIC"
+    try:
+        validate_preview(p, batch_size=100)
+    except RuntimeError as exc:
+        assert "Non-RAW" in str(exc)
+    else:
+        assert False, "Synthetic RAW must never be written"
+
+    p = _sample_batch_preview()
+    p["eligible_candidates"] = 4
+    try:
+        validate_preview(p, batch_size=100)
+    except RuntimeError as exc:
+        assert "candidate count" in str(exc)
+    else:
+        assert False, "Incomplete batch must never be written"
+
+
+def test_unattended_batch_checks_write_counts_and_exact_sha():
+    from src.geocoding.historical_geocode_batch_runner_v1 import verify_apply
+    preview = {"plan_sha256": "a" * 64}
+    applied = {
+        "mode": "APPLY_SAFE_GUARDED", "plan_sha256": "a" * 64,
+        "counts": {"applied": 5}, "db_writes": 5,
+        "errors": [], "google_calls": 0,
+    }
+    verify_apply(applied, preview, expected_applied=5)
+    applied["db_writes"] = 4
+    try:
+        verify_apply(applied, preview, expected_applied=5)
+    except RuntimeError as exc:
+        assert "DB write" in str(exc)
+    else:
+        assert False, "Mismatched write count must stop batch processing"
+
+
+
+def test_server_side_pvp_cursor_reduces_full_history_fetch():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    old = h._all
+    seen = []
+    try:
+        def fake_all(base, key, table, params):
+            seen.append((table, dict(params)))
+            return []
+        h._all = fake_all
+        assert h._fetch_active_listings("", "", [], after_pvp_id="4638836") == []
+        assert seen[-1][1]["pvp_id"] == "gt.4638836"
+        h._fetch_active_listings("", "", ["4638837"], after_pvp_id="4638836")
+        assert seen[-1][1]["pvp_id"] == "in.(4638837)"
+    finally:
+        h._all = old
+
+
+def test_bounded_parallel_apply_uses_same_verified_single_auction_path():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    import threading
+    barrier = threading.Barrier(3)
+    processed = []
+    old = h._apply_case
+    try:
+        def fake_apply(base, key, case):
+            barrier.wait(timeout=3)
+            processed.append(case["pvp_id"])
+            return {"status": "PASS"}
+        h._apply_case = fake_apply
+        safe = [
+            {"pvp_id": str(i), "safe_to_apply": True} for i in range(3)
+        ]
+        safe.append({"pvp_id": "blocked", "safe_to_apply": False})
+        successes = []
+        h._apply_cases_bounded("", "", safe, 3, lambda i, case: successes.append(case["pvp_id"]))
+        assert set(processed) == {"0", "1", "2"}
+        assert set(successes) == set(processed)
+        assert "blocked" not in successes
+    finally:
+        h._apply_case = old
+
+
+def test_parallel_apply_rejects_duplicate_auction_ids():
+    from src.geocoding import historical_geocode_backfill_v2 as h
+    try:
+        h._apply_cases_bounded("", "", [
+            {"pvp_id": "42", "safe_to_apply": True},
+            {"pvp_id": "42", "safe_to_apply": True},
+        ], 3, lambda i, case: None)
+    except RuntimeError as exc:
+        assert "Duplicate PVP" in str(exc)
+    else:
+        assert False, "Duplicate listing must not be written in parallel"

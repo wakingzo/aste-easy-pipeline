@@ -6,9 +6,11 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -29,6 +31,7 @@ import unified_offline_v1 as unified_offline
 import listing_locations_materializer_v1 as materializer
 import primary_pin_publisher_v2_preview as pin_publisher
 import istat_boundary_runtime_v11_6 as boundary_runtime
+import google_civic_arbitration_v1 as google_civic
 
 VERSION = "historical_geocode_backfill_v2"
 PAGE = 1000
@@ -180,15 +183,37 @@ def _parent_precision(technical_precision):
     return mapping[value]
 
 
-def _safe_to_apply(old_precision, new_precision, technical_precision):
-    oldp = str(old_precision or "").strip().upper()
-    newp = str(new_precision or "").strip().upper()
-    tech = str(technical_precision or "").strip().upper()
-    if tech == "CIVICO":
-        return True, "NEW_CIVICO"
-    if PRECISION_RANK.get(newp, 0) >= PRECISION_RANK.get(oldp, 0):
-        return True, "NO_PRECISION_DOWNGRADE"
-    return False, f"WOULD_DOWNGRADE_{oldp or 'UNKNOWN'}_TO_{newp or 'UNKNOWN'}"
+def _safe_to_apply(*, input_source, technical_precision, original_status,
+                   location_count, has_conflict, old_pvp_inside, new_pin_safe,
+                   admin_matches=True):
+    """Rebaseline against RAW + current geocoder, NEVER old claimed precision.
+
+    No synthetic RAW writes, no partial replacement of multi-bene records,
+    no unresolved conflicts, no unverified municipality escapes. A COMUNE
+    fallback is only acceptable when RAW has no coherent PVP coordinate.
+    """
+    if input_source != "RAW_PVP_HISTORICAL":
+        return False, "RAW_REQUIRED_BEFORE_APPLY"
+    if location_count < 1:
+        return False, "RAW_BENI_MISSING"
+    if admin_matches is False:
+        return False, "RAW_SOURCE_COMUNE_CONFLICT"
+    if admin_matches is None:
+        return False, "RAW_SOURCE_COMUNE_UNRESOLVED"
+    if not new_pin_safe:
+        return False, "NEW_PIN_NOT_INSIDE_SOURCE_COMUNE"
+    tech = str(technical_precision or "").upper()
+    if tech not in {"CIVICO", "PVP_COORD", "STRADA", "LOCALITA", "COMUNE"}:
+        return False, "UNSUPPORTED_NEW_TECHNICAL_PRECISION"
+    if has_conflict and str(original_status or "").upper() != "RESOLVED":
+        return False, "UNRESOLVED_NEW_GEOCODER_CONFLICT"
+    if tech == "COMUNE":
+        if old_pvp_inside:
+            return False, "RAW_PVP_INSIDE_BUT_NEW_ONLY_COMUNE"
+        return True, "RAW_REBASELINE_INDICATIVE_COMUNE"
+    if str(original_status or "").upper() != "RESOLVED":
+        return False, "NEW_GEOCODER_REVIEW_NOT_APPLICABLE"
+    return True, "RAW_REBASELINE_" + tech
 
 
 def _parse_ids(raw):
@@ -206,7 +231,7 @@ def _parse_ids(raw):
     return out
 
 
-def _fetch_active_listings(base, key, explicit_ids):
+def _fetch_active_listings(base, key, explicit_ids, after_pvp_id=""):
     today = datetime.now().astimezone().date().isoformat()
     params = {
         "select": (
@@ -220,6 +245,11 @@ def _fetch_active_listings(base, key, explicit_ids):
     }
     if explicit_ids:
         params["pvp_id"] = "in.(" + ",".join(explicit_ids) + ")"
+    elif after_pvp_id:
+        # PVP ID is TEXT in DB. Use the same lexical comparison as the
+        # existing deterministic batch cursor, but filter on the server:
+        # eliminates re-downloading tens of thousands of earlier listings.
+        params["pvp_id"] = "gt." + str(after_pvp_id)
     return _all(base, key, "listings", params)
 
 
@@ -270,8 +300,8 @@ def _sanitize_locations_for_rpc(rows):
     return out
 
 
-def _build_candidates(base, key, explicit_ids, limit):
-    listings = _fetch_active_listings(base, key, explicit_ids)
+def _build_candidates(base, key, explicit_ids, limit, after_pvp_id=""):
+    listings = _fetch_active_listings(base, key, explicit_ids, after_pvp_id)
     ids = [str(x.get("pvp_id") or "") for x in listings if x.get("pvp_id")]
     meta = _fetch_primary_location_meta(base, key, ids)
     candidates = []
@@ -373,7 +403,100 @@ def _synthetic_raw_from_db(listing):
     }
 
 
-def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary):
+def _merge_stored_secondary_locations(fresh_locations, stored_locations):
+    """Keep every RAW bene and prevent loss of already saved secondary data.
+
+    RAW bene_index is authoritative for the new shape; legacy secondary fields
+    only fill holes, and existing secondary geocodes survive only when the
+    original address/municipality matches at the same bene_index. There is
+    still exactly ONE primary, and no new secondary map marker is published.
+    """
+    fresh = [dict(r) for r in fresh_locations]
+    if len({r["bene_index"] for r in fresh}) != len(fresh):
+        raise RuntimeError("Duplicate RAW bene_index during secondary merge")
+    if sum(r.get("is_primary") is True for r in fresh) != 1:
+        raise RuntimeError("RAW materialization must contain exactly one primary")
+
+    old = {}
+    for row in stored_locations or []:
+        idx = row.get("bene_index")
+        if idx in old:
+            raise RuntimeError("Duplicate stored bene_index during secondary merge")
+        old[idx] = row
+
+    # We cannot safely discard extra rows whose identity cannot be reconciled
+    # against the primary PVP source. Require a dedicated review instead.
+    extra = set(old).difference(r["bene_index"] for r in fresh)
+    if extra:
+        raise RuntimeError(
+            "Stored secondary bene_index missing in RAW: " + ",".join(map(str, sorted(extra)))
+        )
+
+    fallback_fields = (
+        "address_raw", "comune_pvp", "provincia_pvp", "sigla_provincia_pvp",
+        "cap_pvp", "codice_istat", "street", "civic", "internal", "locality",
+    )
+    result = []
+    for item in fresh:
+        if item.get("is_primary") is True:
+            result.append(item)
+            continue
+        existing = old.get(item["bene_index"])
+        if existing is None:
+            result.append(item)
+            continue
+
+        used_existing = False
+        for k in fallback_fields:
+            if item.get(k) in (None, "") and existing.get(k) not in (None, ""):
+                item[k] = existing[k]
+                used_existing = True
+        if (
+            item.get("pvp_latitudine") is None
+            and item.get("pvp_longitudine") is None
+            and existing.get("pvp_latitudine") is not None
+            and existing.get("pvp_longitudine") is not None
+            and existing.get("is_primary") is False
+        ):
+            item["pvp_latitudine"] = existing["pvp_latitudine"]
+            item["pvp_longitudine"] = existing["pvp_longitudine"]
+            used_existing = True
+
+        # Do not silently erase an existing secondary resolution. Only retain
+        # it when the physical address and commune have the same RAW identity.
+        if existing.get("is_primary") is False and (
+            existing.get("latitudine") is not None
+            or existing.get("longitudine") is not None
+        ):
+            def normalized(v):
+                return " ".join(str(v or "").casefold().split())
+            if (
+                normalized(existing.get("address_raw")) != normalized(item.get("address_raw"))
+                or normalized(existing.get("comune_pvp")) != normalized(item.get("comune_pvp"))
+                or existing.get("latitudine") is None
+                or existing.get("longitudine") is None
+            ):
+                raise RuntimeError("Secondary resolved location identity changed; refuse overwrite")
+            for k in (
+                "latitudine", "longitudine", "source", "precision", "confidence",
+                "status", "formatted_address", "anncsu_status", "google_status",
+                "resolution_reason", "resolver_version",
+            ):
+                item[k] = existing.get(k)
+            item["warnings"] = list(dict.fromkeys(
+                list(item.get("warnings") or []) + list(existing.get("warnings") or [])
+            ))
+            used_existing = True
+
+        if used_existing:
+            item["warnings"] = list(dict.fromkeys(
+                list(item.get("warnings") or []) + ["HISTORICAL_SECONDARY_DATA_PRESERVED"]
+            ))
+        result.append(item)
+    return result
+
+
+def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat, pin_cache, boundary, arbitrator=None, stored_locations_loader=None):
     pid = str(listing["pvp_id"])
 
     resolved = address_resolver.process_row(raw)
@@ -388,11 +511,21 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         raise RuntimeError("Materialized location problems: " + json.dumps(problems[:5], ensure_ascii=False))
     if not locations:
         raise RuntimeError("No listing_locations rows materialized")
+    if input_source == "RAW_PVP_HISTORICAL" and len(locations) != int(resolved.get("beni_count") or 0):
+        raise RuntimeError("RAW bene count differs from location materialization")
+    if input_source == "RAW_PVP_HISTORICAL" and len(locations) > 1:
+        stored = stored_locations_loader(listing["listing_id"]) if stored_locations_loader else []
+        locations = _merge_stored_secondary_locations(locations, stored)
 
     primaries = [x for x in locations if x.get("is_primary") is True]
     if len(primaries) != 1:
         raise RuntimeError(f"Expected exactly one primary location; got {len(primaries)}")
     primary = primaries[0]
+    if arbitrator is not None and input_source == "RAW_PVP_HISTORICAL":
+        reviewed = arbitrator.resolve(primary, len(locations), listing, boundary)
+        if reviewed is not primary:
+            locations = [reviewed if r.get("is_primary") is True else r for r in locations]
+            primary = reviewed
 
     pin, no_pin_reason = pin_publisher.choose_pin(primary, pin_ann, pin_istat, pin_cache)
 
@@ -458,6 +591,7 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
                     "longitudine": float(pin["lon"]),
                     "source": pin["source"],
                     "precision": pin["precision"],
+                    "confidence": pin_publisher.published_confidence(pin, item.get("confidence")),
                     "status": "RESOLVED",
                     "formatted_address": pin.get("formatted_address"),
                     "resolution_reason": pin.get("reason"),
@@ -468,17 +602,38 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         updated_locations.append(item)
 
     parent_precision = _parent_precision(pin["precision"])
-    safe, safe_reason = _safe_to_apply(
-        listing.get("geocode_precision"),
-        parent_precision,
-        pin.get("precision"),
+    admin_row = {
+        "comune": listing.get("comune"),
+        "provincia": listing.get("provincia"),
+        "sigla_provincia": listing.get("sigla_provincia"),
+        "regione": listing.get("regione"),
+    }
+    new_safe = boundary.test(
+        admin_row, lat=pin["lat"], lon=pin["lon"]
+    ).get("safe") is True
+    pvp_safe = boundary.test(
+        admin_row,
+        lat=primary.get("pvp_latitudine"),
+        lon=primary.get("pvp_longitudine"),
+    ).get("safe") is True if (
+        pin_publisher.valid_pair(
+            primary.get("pvp_latitudine"),
+            primary.get("pvp_longitudine"),
+        )
+    ) else False
+    admin_matches, admin_reason = pin_publisher.source_admin_matches_listing(
+        listing, primary, boundary
     )
-    if input_source == "DB_SYNTHETIC":
-        # Synthetic input is useful for a fast read-only diagnosis, but it cannot
-        # prove the original PVP bene structure (multi-bene / multi-address).
-        # Never apply it: require the preserved historical RAW before writes.
-        safe = False
-        safe_reason = "RAW_REQUIRED_BEFORE_APPLY"
+    safe, safe_reason = _safe_to_apply(
+        input_source=input_source,
+        technical_precision=pin.get("precision"),
+        original_status=primary.get("status"),
+        location_count=len(updated_locations),
+        has_conflict="PVP_ANNCSU_CIVIC_CONFLICT" in (primary.get("warnings") or []),
+        old_pvp_inside=pvp_safe,
+        new_pin_safe=new_safe,
+        admin_matches=admin_matches,
+    )
     movement = _haversine_m(
         listing.get("latitudine"),
         listing.get("longitudine"),
@@ -525,6 +680,8 @@ def _resolve_one(listing, raw, input_source, ann_db, loc_db, pin_ann, pin_istat,
         ),
         "safe_to_apply": safe,
         "safe_reason": safe_reason,
+        "raw_parent_admin_match": admin_matches,
+        "raw_parent_admin_reason": admin_reason,
         "locations": updated_locations,
     }
 
@@ -561,6 +718,12 @@ def _patch_parent(base, key, listing_id, payload):
     return rows[0]
 
 
+def _coords_equal_or_both_missing(a_lat, a_lon, b_lat, b_lon):
+    if all(v is None for v in (a_lat, a_lon, b_lat, b_lon)):
+        return True
+    return _same_coord(a_lat, a_lon, b_lat, b_lon)
+
+
 def _verify_case(base, key, case):
     pid = str(case["pvp_id"])
     rows = _get(
@@ -588,29 +751,42 @@ def _verify_case(base, key, case):
         return False, "parent precision mismatch"
 
     locs = _get(
-        base,
-        key,
-        "listing_locations",
+        base, key, "listing_locations",
         {
-            "select": "pvp_id,is_primary,latitudine,longitudine,source,precision,status,resolver_version,bene_index",
+            "select": (
+                "pvp_id,bene_index,is_primary,address_raw,comune_pvp,"
+                "pvp_latitudine,pvp_longitudine,latitudine,longitudine,"
+                "source,precision,status,resolver_version"
+            ),
             "pvp_id": "eq." + pid,
             "order": "bene_index.asc",
-            "limit": "100",
+            "limit": "1000",
         },
     )
-    primaries = [x for x in locs if x.get("is_primary") is True]
-    if len(locs) != len(case["locations"]):
+    expected_locs = case["locations"]
+    if len(locs) != len(expected_locs):
         return False, "location count mismatch"
-    if len(primaries) != 1:
+    if sum(x.get("is_primary") is True for x in locs) != 1:
         return False, "primary location count mismatch"
-    primary = primaries[0]
-    if not _same_coord(
-        primary.get("latitudine"),
-        primary.get("longitudine"),
-        expected["latitudine"],
-        expected["longitudine"],
-    ):
-        return False, "primary location coordinates mismatch"
+    indexed = {x["bene_index"]: x for x in locs}
+    if len(indexed) != len(locs):
+        return False, "duplicate stored bene_index"
+    for planned in expected_locs:
+        idx = planned["bene_index"]
+        got = indexed.get(idx)
+        if got is None:
+            return False, f"missing secondary or primary bene_index={idx}"
+        if got.get("is_primary") is not planned.get("is_primary"):
+            return False, f"is_primary mismatch bene_index={idx}"
+        for field in ("address_raw", "comune_pvp", "source", "precision", "status", "resolver_version"):
+            if str(got.get(field) or "") != str(planned.get(field) or ""):
+                return False, f"{field} mismatch bene_index={idx}"
+        for prefix in ("", "pvp_"):
+            la, lo = prefix + "latitudine", prefix + "longitudine"
+            if not _coords_equal_or_both_missing(
+                got.get(la), got.get(lo), planned.get(la), planned.get(lo)
+            ):
+                return False, f"{prefix}coordinates mismatch bene_index={idx}"
     return True, "PASS"
 
 
@@ -630,6 +806,14 @@ def _apply_case(base, key, case):
     if len(old_parent_rows) != 1:
         raise RuntimeError("Unable to snapshot parent listing")
     old_parent = old_parent_rows[0]
+    # Basic compare-and-refuse: don't overwrite a parent already changed
+    # since the frozen plan was built.
+    planned_old = case["old"]
+    if not _coords_equal_or_both_missing(
+        old_parent.get("latitudine"), old_parent.get("longitudine"),
+        planned_old.get("latitudine"), planned_old.get("longitudine"),
+    ) or str(old_parent.get("geocode_precision") or "") != str(planned_old.get("geocode_precision") or ""):
+        raise RuntimeError("STALE_PARENT_DATA: parent changed since frozen plan")
     old_locations = _fetch_locations_snapshot(base, key, listing_id)
 
     new_locations = case["locations"]
@@ -638,10 +822,11 @@ def _apply_case(base, key, case):
     child_written = False
     parent_written = False
     try:
+        child_written = True  # A network response may fail AFTER commit.
         _replace_locations(base, key, pid, new_locations, validate=False)
-        child_written = True
 
         new = case["new"]
+        parent_written = True  # Roll back even if the response gets lost.
         _patch_parent(
             base,
             key,
@@ -653,7 +838,6 @@ def _apply_case(base, key, case):
                 "geocode_precision": new["geocode_precision"],
             },
         )
-        parent_written = True
 
         ok, reason = _verify_case(base, key, case)
         if not ok:
@@ -692,6 +876,62 @@ def _apply_case(base, key, case):
         raise
 
 
+def _apply_cases_bounded(base, key, cases, workers, on_success):
+    """Apply independent listings with bounded HTTPS concurrency, no DB schema changes.
+
+    Only one physical auction is modified by each worker. On failure, never
+    start a new item: join already-started workers, then propagate the error.
+    All writes still pass through _apply_case validation, snapshots, rollback,
+    and post-apply checks. Completion/counters are recorded on the main thread.
+    """
+    selected = [(i, case) for i, case in enumerate(cases, 1) if case["safe_to_apply"]]
+    if workers == 1:
+        for i, case in selected:
+            _apply_case(base, key, case)
+            on_success(i, case)
+        return
+    if len({str(c["pvp_id"]) for _, c in selected}) != len(selected):
+        raise RuntimeError("Duplicate PVP IDs cannot be applied concurrently")
+
+    it = iter(selected)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="raw-backfill") as executor:
+        pending = {}
+
+        def submit_one():
+            nxt = next(it, None)
+            if nxt is None:
+                return False
+            i, case = nxt
+            pending[executor.submit(_apply_case, base, key, case)] = (i, case)
+            return True
+
+        for _ in range(workers):
+            if not submit_one():
+                break
+
+        first_failure = None
+        while pending:
+            finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in finished:
+                i, case = pending.pop(future)
+                try:
+                    future.result()
+                except Exception as exc:
+                    if first_failure is None:
+                        first_failure = RuntimeError(
+                            f"APPLY_FAILED pvp={case['pvp_id']}: {exc!r}; "
+                            "no further listings started"
+                        )
+                else:
+                    on_success(i, case)
+            if first_failure is None:
+                for _ in finished:
+                    if not submit_one():
+                        break
+        if first_failure is not None:
+            raise first_failure
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Re-resolve active historical auction pins with the current offline geocoder"
@@ -699,7 +939,17 @@ def main(argv=None):
     ap.add_argument(
         "--apply",
         action="store_true",
-        help="Apply only safe non-downgrading results; default is preview",
+        help="Apply ONLY a preview-authorized exact RAW batch; default is zero writes",
+    )
+    ap.add_argument(
+        "--expected-plan-sha",
+        default="",
+        help="Required with --apply: plan_sha256 copied from matching RAW-only batch preview",
+    )
+    ap.add_argument(
+        "--apply-workers", type=int, default=1,
+        help="Concurrent independent listing applies 1..4 (default 1). "
+             "Does not change geocoder rules or the exact-plan guard.",
     )
     ap.add_argument(
         "--pvp-ids",
@@ -710,8 +960,17 @@ def main(argv=None):
         "--max-rows",
         type=int,
         default=0,
-        help="0 = all eligible candidates",
+        help="0 = all eligible candidates; with --require-raw selects RAW-only batch",
     )
+    ap.add_argument(
+        "--after-pvp-id",
+        default="",
+        help="Continue after this PVP ID in database TEXT order; avoid rescanning permanently blocked IDs",
+    )
+    ap.add_argument("--google-conflict-max-http", type=int, default=0,
+                    help="0=offline; explicitly authorize at most 1..3 Google requests in PREVIEW only for >1 km PVP/ANNCSU conflicts")
+    ap.add_argument("--google-conflict-monthly-cap", type=int, default=9000,
+                    help="Existing shared Google ledger hard cap (<=9000); never a new quota")
     ap.add_argument(
         "--raw-file",
         default=str(Path(RAW_DIR) / "listings_api_raw.jsonl"),
@@ -725,17 +984,46 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be >= 0")
+    if not 1 <= args.apply_workers <= 4:
+        ap.error("--apply-workers must be 1..4")
+    if args.after_pvp_id and not args.after_pvp_id.isdigit():
+        ap.error("--after-pvp-id must be a numeric PVP ID")
+    if not 0 <= args.google_conflict_max_http <= 3:
+        ap.error("--google-conflict-max-http must be 0..3")
+    if not 1 <= args.google_conflict_monthly_cap <= 9000:
+        ap.error("--google-conflict-monthly-cap must be 1..9000")
+    if args.apply and args.google_conflict_max_http:
+        ap.error("Live Google cross-check is PREVIEW-only for historical backfill; zero apply writes")
+    if args.apply and (not args.expected_plan_sha or not args.require_raw or not 1 <= args.max_rows <= 250):
+        ap.error("--apply requires --expected-plan-sha, --require-raw and --max-rows 1..250")
+    if args.apply and not re.fullmatch(r"[a-fA-F0-9]{64}", args.expected_plan_sha or ""):
+        ap.error("--expected-plan-sha must be a 64-character SHA256")
     ensure_runtime_dirs()
     load_project_env(required=("SUPABASE_URL", "SUPABASE_SERVICE_ROLE"))
     base = os.environ["SUPABASE_URL"].rstrip("/")
     key = os.environ["SUPABASE_SERVICE_ROLE"]
     explicit_ids = _parse_ids(args.pvp_ids)
 
+    # Collect RAW coverage before applying the batch limit, so a batch of 50
+    # means 50 RAW auctions, not 50 legacy rows with mostly synthetic input.
     all_active, candidates, skipped_modern = _build_candidates(
-        base, key, explicit_ids, args.max_rows
+        base, key, explicit_ids, 0, args.after_pvp_id
     )
     wanted_ids = [str(x.get("pvp_id") or "") for x in candidates]
     raw_index, raw_stats = _load_raw_index(args.raw_file, wanted_ids)
+    if args.require_raw:
+        candidates = [row for row in candidates if str(row["pvp_id"]) in raw_index]
+    if args.after_pvp_id:
+        # pvp_id is TEXT in Supabase, and the query orders it lexically.
+        candidates = [
+            row for row in candidates
+            if str(row["pvp_id"]) > args.after_pvp_id
+        ]
+    if args.max_rows:
+        candidates = candidates[:args.max_rows]
+    raw_stats["selected_raw_batch"] = sum(
+        str(row["pvp_id"]) in raw_index for row in candidates
+    )
     print(
         f"[BACKFILL] active_future={len(all_active)} candidates={len(candidates)} "
         f"skipped_modern={skipped_modern} explicit={len(explicit_ids)} apply={int(args.apply)} "
@@ -759,6 +1047,10 @@ def main(argv=None):
     pin_istat = pin_publisher.open_istat_localities()
     pin_cache = {}
     boundary = boundary_runtime.BoundaryContext()
+    arbitrator = google_civic.ConflictArbitrator(
+        max_http=args.google_conflict_max_http,
+        monthly_cap=args.google_conflict_monthly_cap,
+    )
 
     cases = []
     errors = []
@@ -787,12 +1079,15 @@ def main(argv=None):
                     pin_istat,
                     pin_cache,
                     boundary,
+                    arbitrator=arbitrator,
+                    stored_locations_loader=lambda lid: _fetch_locations_snapshot(base, key, lid),
                 )
                 cases.append(case)
                 counters["resolved"] += 1
                 counters[
-                    "safe_to_apply" if case["safe_to_apply"] else "blocked_downgrade"
+                    "safe_to_apply" if case["safe_to_apply"] else "blocked_rebaseline"
                 ] += 1
+                counters["decision:" + str(case["safe_reason"])] += 1
                 counters[
                     "same_parent_pin" if case["same_parent_pin"] else "changed_parent_pin"
                 ] += 1
@@ -802,10 +1097,8 @@ def main(argv=None):
                     "precision:" + str(case["new"]["technical_precision"] or "NONE")
                 ] += 1
 
-                if args.apply and case["safe_to_apply"]:
-                    _apply_case(base, key, case)
-                    counters["applied"] += 1
-
+                # Phase 1 is ALWAYS read-only: authorization must verify the
+                # full frozen plan SHA before we perform even the first write.
                 print(
                     f"[BACKFILL] {index}/{len(candidates)} pvp={pid} "
                     f"{case['old']['geocode_precision']} -> {case['new']['geocode_precision']} "
@@ -831,10 +1124,13 @@ def main(argv=None):
                 )
 
     finally:
-        ann_db.close()
-        loc_db.close()
-        pin_ann.close()
-        pin_istat.close()
+        try:
+            arbitrator.finish()
+        finally:
+            ann_db.close()
+            loc_db.close()
+            pin_ann.close()
+            pin_istat.close()
 
     canonical = [
         {
@@ -842,6 +1138,12 @@ def main(argv=None):
             "old": x["old"],
             "new": x["new"],
             "safe_to_apply": x["safe_to_apply"],
+            "safe_reason": x["safe_reason"],
+            "input_source": x["input_source"],
+            "locations": [
+                {k: v for k, v in row.items() if k != "checked_at"}
+                for row in x["locations"]
+            ],
         }
         for x in cases
     ]
@@ -854,6 +1156,35 @@ def main(argv=None):
         ).encode("utf-8")
     ).hexdigest()
 
+    # Recheck the exact frozen plan before the first write. Incomplete
+    # previews or changes to parent/secondary data are NOT implicitly approved.
+    if args.apply:
+        if errors:
+            raise RuntimeError(
+                f"APPLY_ABORTED: {len(errors)} preflight errors; zero DB writes"
+            )
+        if plan_sha.lower() != args.expected_plan_sha.lower():
+            raise RuntimeError(
+                "APPLY_PLAN_SHA_MISMATCH: zero DB writes. Preview SHA="
+                + plan_sha + "; supplied=" + args.expected_plan_sha
+            )
+        print(
+            f"[BACKFILL APPLY] authorized={len(cases)} "
+            f"eligible={sum(bool(c['safe_to_apply']) for c in cases)} "
+            f"sha={plan_sha}",
+            flush=True,
+        )
+        def record_success(index, case):
+            counters["applied"] += 1
+            print(
+                f"[BACKFILL APPLIED] {counters['applied']}/"
+                f"{sum(bool(c['safe_to_apply']) for c in cases)} "
+                f"pvp={case['pvp_id']}",
+                flush=True,
+            )
+
+        _apply_cases_bounded(base, key, cases, args.apply_workers, record_success)
+
     summary = {
         "version": VERSION,
         "mode": "APPLY_SAFE_GUARDED" if args.apply else "PREVIEW_ZERO_DB_WRITES",
@@ -863,6 +1194,9 @@ def main(argv=None):
         "skipped_already_modern": skipped_modern,
         "explicit_pvp_ids": explicit_ids,
         "max_rows": args.max_rows,
+        "after_pvp_id": args.after_pvp_id,
+        "batch_first_pvp_id": str(candidates[0]["pvp_id"]) if candidates else None,
+        "batch_last_pvp_id": str(candidates[-1]["pvp_id"]) if candidates else None,
         "raw_stats": raw_stats,
         "plan_sha256": plan_sha,
         "counts": dict(counters),
@@ -870,7 +1204,8 @@ def main(argv=None):
         "errors": errors,
         "cases": cases,
         "elapsed_seconds": round(time.perf_counter() - started, 3),
-        "google_calls": 0,
+        "google_arbitration": arbitrator.summary(),
+        "google_calls": arbitrator.summary()["network_attempts"],
     }
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
