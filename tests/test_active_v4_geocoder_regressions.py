@@ -501,3 +501,65 @@ def test_backfill_post_apply_verifies_every_secondary_address_and_coordinate():
         assert not good and "pvp_coordinates mismatch bene_index=1" in why
     finally:
         h._get = original_get
+
+
+def _sample_batch_preview(*, errors=None):
+    from copy import deepcopy
+    return {
+        "mode": "PREVIEW_ZERO_DB_WRITES",
+        "db_writes": 0, "google_calls": 0,
+        "eligible_candidates": 3,
+        "batch_last_pvp_id": "200",
+        "plan_sha256": "a" * 64,
+        "raw_stats": {"raw_file_present": True, "selected_raw_batch": 3},
+        "cases": [
+            {"pvp_id": "100", "input_source": "RAW_PVP_HISTORICAL", "safe_to_apply": True},
+            {"pvp_id": "150", "input_source": "RAW_PVP_HISTORICAL", "safe_to_apply": False},
+        ],
+        "errors": [{"pvp_id": "200", "error": "Missing admin data"}],
+    }
+
+
+def test_unattended_batch_preview_can_skip_individual_errors():
+    from src.geocoding.historical_geocode_batch_runner_v1 import validate_preview
+    p = _sample_batch_preview()
+    assert validate_preview(p, batch_size=100) == ["100"]
+
+
+def test_unattended_batch_rejects_nonraw_inputs_and_incomplete_counts():
+    from src.geocoding.historical_geocode_batch_runner_v1 import validate_preview
+    p = _sample_batch_preview()
+    p["cases"][0]["input_source"] = "DB_SYNTHETIC"
+    try:
+        validate_preview(p, batch_size=100)
+    except RuntimeError as exc:
+        assert "Non-RAW" in str(exc)
+    else:
+        assert False, "Synthetic RAW must never be written"
+
+    p = _sample_batch_preview()
+    p["eligible_candidates"] = 4
+    try:
+        validate_preview(p, batch_size=100)
+    except RuntimeError as exc:
+        assert "candidate count" in str(exc)
+    else:
+        assert False, "Incomplete batch must never be written"
+
+
+def test_unattended_batch_checks_write_counts_and_exact_sha():
+    from src.geocoding.historical_geocode_batch_runner_v1 import verify_apply
+    preview = {"plan_sha256": "a" * 64}
+    applied = {
+        "mode": "APPLY_SAFE_GUARDED", "plan_sha256": "a" * 64,
+        "counts": {"applied": 5}, "db_writes": 5,
+        "errors": [], "google_calls": 0,
+    }
+    verify_apply(applied, preview, expected_applied=5)
+    applied["db_writes"] = 4
+    try:
+        verify_apply(applied, preview, expected_applied=5)
+    except RuntimeError as exc:
+        assert "DB write" in str(exc)
+    else:
+        assert False, "Mismatched write count must stop batch processing"
