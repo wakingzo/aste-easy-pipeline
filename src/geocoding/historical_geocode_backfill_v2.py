@@ -10,6 +10,7 @@ import re
 import sys
 import time
 from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
@@ -870,6 +871,62 @@ def _apply_case(base, key, case):
         raise
 
 
+def _apply_cases_bounded(base, key, cases, workers, on_success):
+    """Apply independent listings with bounded HTTPS concurrency, no DB schema changes.
+
+    Only one physical auction is modified by each worker. On failure, never
+    start a new item: join already-started workers, then propagate the error.
+    All writes still pass through _apply_case validation, snapshots, rollback,
+    and post-apply checks. Completion/counters are recorded on the main thread.
+    """
+    selected = [(i, case) for i, case in enumerate(cases, 1) if case["safe_to_apply"]]
+    if workers == 1:
+        for i, case in selected:
+            _apply_case(base, key, case)
+            on_success(i, case)
+        return
+    if len({str(c["pvp_id"]) for _, c in selected}) != len(selected):
+        raise RuntimeError("Duplicate PVP IDs cannot be applied concurrently")
+
+    it = iter(selected)
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="raw-backfill") as executor:
+        pending = {}
+
+        def submit_one():
+            nxt = next(it, None)
+            if nxt is None:
+                return False
+            i, case = nxt
+            pending[executor.submit(_apply_case, base, key, case)] = (i, case)
+            return True
+
+        for _ in range(workers):
+            if not submit_one():
+                break
+
+        first_failure = None
+        while pending:
+            finished, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+            for future in finished:
+                i, case = pending.pop(future)
+                try:
+                    future.result()
+                except Exception as exc:
+                    if first_failure is None:
+                        first_failure = RuntimeError(
+                            f"APPLY_FAILED pvp={case['pvp_id']}: {exc!r}; "
+                            "no further listings started"
+                        )
+                else:
+                    on_success(i, case)
+            if first_failure is None:
+                for _ in finished:
+                    if not submit_one():
+                        break
+        if first_failure is not None:
+            raise first_failure
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="Re-resolve active historical auction pins with the current offline geocoder"
@@ -883,6 +940,11 @@ def main(argv=None):
         "--expected-plan-sha",
         default="",
         help="Required with --apply: plan_sha256 copied from matching RAW-only batch preview",
+    )
+    ap.add_argument(
+        "--apply-workers", type=int, default=1,
+        help="Concurrent independent listing applies 1..4 (default 1). "
+             "Does not change geocoder rules or the exact-plan guard.",
     )
     ap.add_argument(
         "--pvp-ids",
@@ -917,6 +979,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.max_rows < 0:
         ap.error("--max-rows must be >= 0")
+    if not 1 <= args.apply_workers <= 4:
+        ap.error("--apply-workers must be 1..4")
     if args.after_pvp_id and not args.after_pvp_id.isdigit():
         ap.error("--after-pvp-id must be a numeric PVP ID")
     if not 0 <= args.google_conflict_max_http <= 3:
@@ -1105,14 +1169,16 @@ def main(argv=None):
             f"sha={plan_sha}",
             flush=True,
         )
-        for index, case in enumerate(cases, 1):
-            if not case["safe_to_apply"]:
-                continue
-            # Stop at the first failed apply; a failed rollback or concurrent
-            # edit must not be silently followed by more writes.
-            _apply_case(base, key, case)
+        def record_success(index, case):
             counters["applied"] += 1
-            print(f"[BACKFILL APPLIED] {index}/{len(cases)} pvp={case['pvp_id']}", flush=True)
+            print(
+                f"[BACKFILL APPLIED] {counters['applied']}/"
+                f"{sum(bool(c['safe_to_apply']) for c in cases)} "
+                f"pvp={case['pvp_id']}",
+                flush=True,
+            )
+
+        _apply_cases_bounded(base, key, cases, args.apply_workers, record_success)
 
     summary = {
         "version": VERSION,
