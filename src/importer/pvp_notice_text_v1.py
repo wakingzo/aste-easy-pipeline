@@ -128,6 +128,13 @@ def read_first_page_pdf(pdf_bytes: bytes) -> dict:
             "extracted_chars": len(text), "pages_total": n_pages,
         }
     parsed = extract_attempt_from_first_page_text(text)
+    # Boolean diagnostics only: never save first-page text or contact details.
+    folded = _fold(text)
+    parsed["first_page_keywords"] = {
+        word.lower(): bool(re.search(r"\b"+word+r"\b", folded))
+        for word in ("ESPERIMENTO","TENTATIVO","RIBASSO",
+                     "INCANTO","GARA","BANDO","AVVISO","VENDITA")
+    }
     parsed["extracted_chars"] = len(text)
     parsed["pages_total"] = n_pages
     parsed["page"] = 1 if parsed["evidence"] else None
