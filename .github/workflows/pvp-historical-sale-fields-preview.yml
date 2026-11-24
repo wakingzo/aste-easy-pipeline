@@ -1,0 +1,35 @@
+name: PVP historical sale fields full preview
+
+on:
+  pull_request:
+    paths:
+      - src/audit/pvp_historical_sale_fields_preview_v1.py
+      - .github/workflows/pvp-historical-sale-fields-preview.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-history-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE: ${{ secrets.SUPABASE_SERVICE_ROLE }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python compile
+        run: python -m py_compile src/audit/pvp_historical_sale_fields_preview_v1.py
+      - name: Build complete read-only comparison with saved attachments
+        run: python src/audit/pvp_historical_sale_fields_preview_v1.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pvp-historical-sale-fields-preview
+          path: runtime/reports/pvp_historical_sale_fields_preview_*
+          retention-days: 7
+          if-no-files-found: warn
