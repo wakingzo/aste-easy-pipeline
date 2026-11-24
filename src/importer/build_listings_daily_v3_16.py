@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parent
 SRC_ROOT = ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-from importer.pvp_sale_fields_v1 import pvp_sale_attempt, pvp_lot_number
+from importer.pvp_sale_fields_v1 import pvp_lot_number
+from importer.pvp_sale_attempt_parser_v1 import resolve_sale_attempt
 from aste_paths import RAW_DIR, REFERENCE_DIR, ensure_runtime_dirs
 
 # v3.15 writes into the consolidated runtime/raw area used by the importer.
@@ -1057,7 +1058,7 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         "piano": extract_field_from_beni(detail_body, ["piano", "descPiano", "ubicazionePiano"]),
         "superficie_mq": extract_field_from_beni(detail_body, ["superficie", "superficieCommerciale", "superficieMq"], "mq"),
         "note": None,
-        "esperimento_vendita": pvp_sale_attempt(detail_body, search_item),
+        "esperimento_vendita": resolve_sale_attempt(detail_body, search_item)["value"],
         "cap": cap,
         "status": "active",
     }
