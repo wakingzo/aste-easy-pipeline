@@ -196,7 +196,11 @@ def enrich_new_plan(plan, *, delta_raw, report_dir, mode="report",
         for row, people, attachments, locations in records:
             pid = str(row["pvp_id"])
             wants_pdf = choose_notice(attachments) is not None
-            if wants_pdf and num_pdf >= max_pdfs:
+            # Independent wall-clock guard: a slow PVP host must never
+            # hold the daily pipeline indefinitely. No more than 180 s
+            # are spent starting new downloads in this phase.
+            elapsed = time.monotonic() - started
+            if wants_pdf and (num_pdf >= max_pdfs or elapsed >= 180):
                 item, override = ({"pvp_id":pid, "decision":"budget_exhausted",
                                    "pdf_status":"not_attempted"}, None)
             else:
