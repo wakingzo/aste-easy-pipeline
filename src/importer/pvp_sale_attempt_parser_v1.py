@@ -55,6 +55,8 @@ _NUMBER_LABELS = {"N", "NR", "NUM", "NUMERO"}
 _MONTHS = {
     "GENNAIO", "FEBBRAIO", "MARZO", "APRILE", "MAGGIO", "GIUGNO",
     "LUGLIO", "AGOSTO", "SETTEMBRE", "OTTOBRE", "NOVEMBRE", "DICEMBRE",
+    "GEN", "FEB", "MAR", "APR", "MAG", "GIU", "LUG", "AGO", "SET",
+    "OTT", "NOV", "DIC",
 }
 _TOKEN = re.compile(r"[A-Z]+|\d+(?:[°ºª^])?")
 
@@ -69,6 +71,9 @@ def _tokens(filename: str) -> list[str]:
     # PVP's automatically generated "attoprincipale_1" refers to attachment
     # sequence, not necessarily to the sale attempt.
     s = re.sub(r"(?:\d{8,})?ATTOPRINCIPALE[\s_-]*\d+", " ", s)
+    # "(1)" at the very end is commonly an OS duplicate-file suffix,
+    # not "first experiment" after "secondo esperimento".
+    s = re.sub(r"\(\s*\d{1,2}\s*\)(?=(?:\.(?:PDF|DOCX?|ODT|RTF|TXT|P7M))+$)", " ", s)
     s = re.sub(r"(?:\.(?:PDF|DOCX?|ODT|RTF|TXT|P7M))+$", " ", s)
     # Remove dates and numerical case references *before* splitting separators:
     # "27-16 avviso 4 asta 10-02-27" -> only "4 asta" is a candidate.
@@ -102,6 +107,27 @@ def _context_for(tokens: list[str], i: int, kind: str):
     # additional fourteenth sale. Both can occur in the same filename.
     if kind == "cardinal" and right and right[0] in _MONTHS:
         return None
+    # "29 10 AVVISO": day + month written with spaces.
+    if (kind == "cardinal" and left and left[-1].isdigit()
+            and right and right[0] in _CONTEXT):
+        previous_day = int(left[-1])
+        if 21 <= previous_day <= 31 and 1 <= int(tokens[i]) <= 12:
+            return None
+    # "avviso vendita nr 10 2024 R.G.": "10/2024" case number.
+    if (kind == "cardinal" and right and right[0].isdigit()
+            and 1900 <= int(right[0]) <= 2100 and len(left) > 1
+            and left[-1] in _NUMBER_LABELS):
+        return None
+    # Roman X can mean the tenth sale, but it also means Italian "per"
+    # (sometimes uppercase), or a calendar month. Require explicit nearby
+    # sale context, not "vendita X DIC" or "incanto X comune".
+    if tokens[i] == "X" and kind == "roman":
+        if right and right[0] in _MONTHS:
+            return None
+        if right and right[0] not in _CONTEXT and right[0] not in {
+            "SIGNED", "FIRMATO", "FTO", "REDACTED", "FINAL", "DEFINITIVO"
+        }:
+            return None
 
     # 6° gara; VI esperimento; SESTA GARA; IV AVVISO VENDITA
     after = right[:3]
