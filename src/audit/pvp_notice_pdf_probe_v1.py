@@ -123,6 +123,8 @@ def sample_candidates(session, base, token, missing=40, controls=10, lookback=60
     chosen = []
     quotas = {"missing": missing, "control": controls}
     selected = Counter()
+    seen_notice_signatures = set()
+    skipped_duplicate_signatures = 0
     for listing in listings:
         pid = str(listing["pvp_id"])
         all_attachments = att_by_id.get(pid, [])
@@ -136,26 +138,44 @@ def sample_candidates(session, base, token, missing=40, controls=10, lookback=60
         # Prefer actual notice titles, smaller files in ties.
         matches.sort(key=lambda a: (-notice_score(a.get("filename")),
                                      int(a.get("size_bytes") or MAX_PDF_BYTES)))
+        # One notice can be attached to dozens of lots in the same procedure.
+        # A document signature (name + byte size) prevents those duplicates
+        # from distorting coverage. The final report also counts PDF hashes.
+        chosen_notice = next((
+            a for a in matches if (
+                str(a["filename"]).strip().casefold(),
+                int(a.get("size_bytes") or -1),
+            ) not in seen_notice_signatures
+        ), None)
+        if chosen_notice is None:
+            skipped_duplicate_signatures += 1
+            continue
         filename_result = parse_sale_attempt_from_filenames(
             [x.get("filename") or "" for x in all_attachments])
         group = "control" if filename_result["value"] else "missing"
         if selected[group] >= quotas[group]:
             continue
+        seen_notice_signatures.add((
+            str(chosen_notice["filename"]).strip().casefold(),
+            int(chosen_notice.get("size_bytes") or -1),
+        ))
         chosen.append({
             "pvp_id": pid, "group": group,
             "old_db_attempt": listing.get("esperimento_vendita"),
             "filename_attempt": filename_result["value"],
             "filename_multiple_values": filename_result["multiple_values"],
-            "filename": matches[0]["filename"],
-            "url": matches[0]["resource_url"],
-            "size_bytes": matches[0].get("size_bytes"),
+            "filename": chosen_notice["filename"],
+            "url": chosen_notice["resource_url"],
+            "size_bytes": chosen_notice.get("size_bytes"),
             "attachment_count": len(all_attachments),
         })
         selected[group] += 1
         if all(selected[k] >= quotas[k] for k in quotas):
             break
     return chosen, {"sample_target": quotas, "selected": dict(selected),
-                    "lookback": len(listings)}
+                    "lookback": len(listings),
+                    "deduplication": "casefold(filename)+size_bytes",
+                    "duplicate_signatures_skipped": skipped_duplicate_signatures}
 
 
 def run(missing=40, controls=10, lookback=600):
@@ -194,12 +214,15 @@ def run(missing=40, controls=10, lookback=600):
            for g in ("missing","control")}
     comparisons = [x["filename_pdf_agree"] for x in outcomes
                    if x.get("filename_pdf_agree") is not None]
+    unique_pdf_hashes = {x["pdf_sha256"] for x in outcomes if x.get("pdf_sha256")}
     doc_types = Counter(x.get("document_type") or "(unavailable)" for x in outcomes)
     summary = {
         "mode": "READ_ONLY_SINGLE_SAMPLE_NO_DB_WRITES_NO_OCR_NO_AI",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "selection": selection,
         "counts": dict(counts), "by_group": grp,
+        "unique_pdf_hashes": len(unique_pdf_hashes),
+        "duplicate_pdf_hash_count": sum(bool(x.get("pdf_sha256")) for x in outcomes)-len(unique_pdf_hashes),
         "document_types": dict(doc_types),
         "filename_pdf_comparable": len(comparisons),
         "filename_pdf_equal": sum(x is True for x in comparisons),
