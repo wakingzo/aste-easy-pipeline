@@ -19,6 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SRC_ROOT = BASE_DIR.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+from importer.pvp_sale_fields_v1 import pvp_lot_number
+from importer.pvp_sale_attempt_parser_v1 import resolve_sale_attempt
 from aste_paths import RAW_DIR, REFERENCE_DIR, REPORTS_DIR, ensure_runtime_dirs
 from project_env import load_project_env
 
@@ -164,31 +166,6 @@ def build_maps_link(lat, lon, indirizzo="", comune="", provincia=""):
         return f"https://www.google.com/maps?q={lat_s},{lon_s}"
     q = " ".join(x for x in [clean(indirizzo), clean(comune), clean(provincia)] if clean(x))
     return f"https://www.google.com/maps?q={quote(q)}" if q else ""
-
-
-def clean_esperimento(v):
-    s = clean(v).replace(" ?", "")
-    if "/" in s and re.fullmatch(r"[IVXLC]+/[IVXLC]+", s):
-        return s.split("/")[0]
-    return s
-
-
-def _roman(n: int) -> str:
-    return {1:"I",2:"II",3:"III",4:"IV",5:"V",6:"VI",7:"VII",8:"VIII",9:"IX",10:"X"}.get(n, "")
-
-
-def extract_esperimento_from_filenames(files):
-    if not files:
-        return ""
-    for f in files:
-        up = f.upper()
-        for rn in [" X ", " IX ", " VIII ", " VII ", " VI ", " V ", " IV ", " III ", " II ", " I "]:
-            if rn.strip() in up:
-                return rn.strip()
-        m = re.search(r"\b(10|[1-9])\s*[°ºª\^]?", f)
-        if m:
-            return _roman(int(m.group(1)))
-    return ""
 
 
 def load_comuni_lookup(csv_path: Path):
@@ -769,12 +746,14 @@ def derive_listing_row(obj, allegati_by_id):
             if disponibilita:
                 break
     tribunale = first_non_empty(search_item.get("tribunale"), procedura.get("descUfficio"), detail_body.get("tribunale"))
-    lotto = first_non_empty(search_item.get("numeroLotto"), (detail_body.get("lotto") or {}).get("numeroLotto"), (detail_body.get("lotto") or {}).get("codiLotto"))
+    lotto = pvp_lot_number(detail_body, search_item, descrizione)
     superficie_mq = structured_field_from_beni(detail_body, ["superficie", "superficieCommerciale", "superficieMq"], "mq") or extract_superficie_text(raw_text, descrizione)
     vani = structured_field_from_beni(detail_body, ["numeroVani", "vani"]) or extract_vani_text(raw_text, descrizione)
     piano = structured_field_from_beni(detail_body, ["piano", "descPiano", "ubicazionePiano"]) or extract_piano_text(raw_text, descrizione)
+    # March-style contextual filename extraction only when PVP API has no value.
+    # The resolution object separately preserves API/parser disagreement for audits.
     filenames = [clean(a.get("filename")) for a in allegati_by_id.get(pvp_id, []) if clean(a.get("filename"))]
-    esperimento = clean_esperimento(first_non_empty(detail_body.get("numeEsperimento"), search_item.get("numeEsperimento")) or extract_esperimento_from_filenames(filenames))
+    esperimento = resolve_sale_attempt(detail_body, search_item, filenames)["value"]
     lat = clean(geo_api.get("lat"))
     lon = clean(geo_api.get("lon"))
     maps_link = build_maps_link(lat, lon, indirizzo, comune, provincia)
