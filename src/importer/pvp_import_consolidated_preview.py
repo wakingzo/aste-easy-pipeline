@@ -19,7 +19,8 @@ BASE_DIR = Path(__file__).resolve().parent
 SRC_ROOT = BASE_DIR.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
-from importer.pvp_sale_fields_v1 import pvp_sale_attempt, pvp_lot_number
+from importer.pvp_sale_fields_v1 import pvp_lot_number
+from importer.pvp_sale_attempt_parser_v1 import resolve_sale_attempt
 from aste_paths import RAW_DIR, REFERENCE_DIR, REPORTS_DIR, ensure_runtime_dirs
 from project_env import load_project_env
 
@@ -749,7 +750,10 @@ def derive_listing_row(obj, allegati_by_id):
     superficie_mq = structured_field_from_beni(detail_body, ["superficie", "superficieCommerciale", "superficieMq"], "mq") or extract_superficie_text(raw_text, descrizione)
     vani = structured_field_from_beni(detail_body, ["numeroVani", "vani"]) or extract_vani_text(raw_text, descrizione)
     piano = structured_field_from_beni(detail_body, ["piano", "descPiano", "ubicazionePiano"]) or extract_piano_text(raw_text, descrizione)
-    esperimento = pvp_sale_attempt(detail_body, search_item)
+    # March-style contextual filename extraction only when PVP API has no value.
+    # The resolution object separately preserves API/parser disagreement for audits.
+    filenames = [clean(a.get("filename")) for a in allegati_by_id.get(pvp_id, []) if clean(a.get("filename"))]
+    esperimento = resolve_sale_attempt(detail_body, search_item, filenames)["value"]
     lat = clean(geo_api.get("lat"))
     lon = clean(geo_api.get("lon"))
     maps_link = build_maps_link(lat, lon, indirizzo, comune, provincia)
