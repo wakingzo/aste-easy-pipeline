@@ -458,16 +458,22 @@ def main(argv=None):
     notice_report = None
     if args.notice_pdf_mode == "report":
         t=time.perf_counter()
-        notice_plan = notice_enrichment.enrich_new_plan(
-            plan, delta_raw=DELTA_RAW, report_dir=Path(REPORTS_DIR),
-            mode="report", max_pdfs=args.notice_pdf_max)
-        if any(
-            notice_plan["records"][i][0] != plan["records"][i][0]
-            for i in range(len(plan["records"]))
-        ):
-            raise RuntimeError("PDF notice REPORT attempted to modify a new listing")
-        notice_counts=notice_plan.get("notice_counts",{})
-        notice_report=notice_plan.get("notice_report")
+        try:
+            notice_plan = notice_enrichment.enrich_new_plan(
+                plan, delta_raw=DELTA_RAW, report_dir=Path(REPORTS_DIR),
+                mode="report", max_pdfs=args.notice_pdf_max)
+            if any(
+                notice_plan["records"][i][0] != plan["records"][i][0]
+                for i in range(len(plan["records"]))
+            ):
+                raise RuntimeError("PDF notice REPORT attempted to modify a new listing")
+            notice_counts=notice_plan.get("notice_counts",{})
+            notice_report=notice_plan.get("notice_report")
+        except Exception as exc:
+            # The optional external-document check must never prevent valid
+            # auctions being inserted by the atomic importer.
+            notice_counts={"shadow_error":1,"error_type":type(exc).__name__}
+            print(f"[PVP NOTICE WARNING] shadow audit unavailable: {type(exc).__name__}: {str(exc)[:180]}",flush=True)
         timings["notice_pdf_read_only"]=round(time.perf_counter()-t,3)
 
     if args.apply:
