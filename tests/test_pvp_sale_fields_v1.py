@@ -173,6 +173,7 @@ class TestPVPSaleFields(unittest.TestCase):
             ("AVVISO VENDITA 15.18_ESP-1.pdf", "I"),
             ("AvvisoVendita_34427_34428_34429_5esp_Immobili_firmato.pdf", "V"),
             ("RGE1062024IIAvvisodivenditatelematicaasincrona.pdf", "II"),
+            ("10exp - 17.02.27.pdf", "X"),
             ("2esperimento di vendita.pdf", "II"),
             ("avviso di vendita III esp 29 01 27_signed.pdf", "III"),
             ("BANDO LOTTO 6 CODOGNO CASCINA GAZZINA III - 2° ESPERIMENTO.pdf", "II"),
@@ -195,7 +196,6 @@ class TestPVPSaleFields(unittest.TestCase):
             "BANDO 16-2025 LG.pdf",
             "BANDO x pubblicazione.pdf",
             "003_RGE_29_2025_AVVISO_DI_VENDITA_01_DEPURATO.pdf",
-            "10exp - 17.02.27.pdf",
             "ESP. 2024.pdf",
         ]
         for filename in examples:
