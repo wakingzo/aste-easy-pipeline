@@ -260,7 +260,15 @@ jobs:
           set -euo pipefail
           docker compose run --rm daily \
             python src/pipeline/daily_pipeline_v4.py --auto-apply \
-              --notice-pdf-mode report --notice-pdf-max 120
+              --notice-pdf-mode off
+
+      - name: Archive digital text of new PVP notices (no OCR)
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          docker compose run --rm -e ALLOW_PVP_TEXT_DAILY_WRITE=YES_NEW_ONLY daily \
+            python src/importer/pvp_document_text_daily_v1.py --apply --max-items 150 --max-seconds 420
 
       - name: Reconcile normalized multi-value tipologia
         if: ${{ inputs.tipologia_backfill == 'preview' || inputs.tipologia_backfill == 'apply' }}
