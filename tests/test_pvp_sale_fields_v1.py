@@ -122,6 +122,23 @@ class TestPVPSaleFields(unittest.TestCase):
         self.assertEqual(len(result["evidence"]), 1)
         self.assertEqual(result["evidence"][0]["marker"], "SECONDO")
 
+    def test_history_discovered_case_dates_and_copy_suffixes(self):
+        examples = [
+            ("avviso vendita nr 10 2024 R.G. es..pdf", ""),
+            ("29 10 AVVISO VENDITA 16.02.27.pdf", ""),
+            ("14476083s PROVV.VENDITA X DIC. 2026 RGE 379.2020.pdf", ""),
+            ("Avviso di vendita IV incanto X Comune_Trib .pdf", "IV"),
+            ("Signed - AVVISO SECONDO ESPERIMENTO (1).pdf", "II"),
+            ("Avviso di vendita telematica 20° tentativo.pdf", "XX"),
+            ("X avviso 18.11.2026.pdf", "X"),
+            ("avviso di vendita X.pdf", "X"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                result = parse_sale_attempt_from_filenames([filename])
+                self.assertEqual(result["value"], expected, result["evidence"])
+                self.assertFalse(result["multiple_values"], result["evidence"])
+
     def test_lowercase_x_means_per_not_roman_ten(self):
         cases = [
             "aavviso di vendita RGE 296 2022 x asta 11 nov 2026.pdf",
