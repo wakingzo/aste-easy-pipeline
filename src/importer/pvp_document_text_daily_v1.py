@@ -34,7 +34,7 @@ MAX_BATCH = 150
 MAX_DURATION = 420
 ROW_KEYS = {"allegato_id","pvp_id","stato_estrazione","testo_prima_pagina",
             "testo_completo","numero_pagine","sha256_pdf","parser_versione",
-            "errore_tipo","estratto_il"}
+            "errore_tipo","estratto_il","aggiornato_il"}
 
 
 def supabase(session, method, base, key, resource, *, params=None, payload=None):
@@ -113,6 +113,7 @@ def process_one(db,pvp,base,key,row,*,apply):
         "parser_versione":"pypdf_notice_v1_all_pages",
         "errore_tipo":error_kind,
         "estratto_il":datetime.now(timezone.utc).isoformat(),
+        "aggiornato_il":datetime.now(timezone.utc).isoformat(),
     }
     if set(payload)!=ROW_KEYS:
         raise RuntimeError("Unexpected payload columns")
