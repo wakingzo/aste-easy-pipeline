@@ -1,0 +1,32 @@
+name: PVP sale fields offline regression
+
+on:
+  pull_request:
+    paths:
+      - "src/importer/pvp_sale_fields_v1.py"
+      - "src/importer/pvp_import_consolidated_preview.py"
+      - "src/importer/pvp_import_from_api_raw_hybrid_FINAL.py"
+      - "src/importer/build_listings_daily_v3_16.py"
+      - "src/importer/build_listings_from_pvp_api_RAW_ONLY.py"
+      - "src/audit/backup_listing_sale_fields_v1.py"
+      - "src/audit/pvp_sale_fields_raw_sample_v1.py"
+      - "tests/test_pvp_sale_fields_v1.py"
+      - ".github/workflows/pvp-sale-fields-test.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile changed scripts
+        run: python -m compileall -q src/importer/pvp_sale_fields_v1.py src/importer/pvp_import_consolidated_preview.py src/importer/pvp_import_from_api_raw_hybrid_FINAL.py src/importer/build_listings_daily_v3_16.py src/importer/build_listings_from_pvp_api_RAW_ONLY.py src/audit/backup_listing_sale_fields_v1.py src/audit/pvp_sale_fields_raw_sample_v1.py
+      - name: Source-only field regression tests
+        run: python -m unittest -v tests/test_pvp_sale_fields_v1.py
