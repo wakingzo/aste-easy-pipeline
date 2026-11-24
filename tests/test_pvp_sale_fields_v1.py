@@ -122,6 +122,23 @@ class TestPVPSaleFields(unittest.TestCase):
         self.assertEqual(len(result["evidence"]), 1)
         self.assertEqual(result["evidence"][0]["marker"], "SECONDO")
 
+    def test_lowercase_x_means_per_not_roman_ten(self):
+        cases = [
+            "aavviso di vendita RGE 296 2022 x asta 11 nov 2026.pdf",
+            "ESTRATTO avviso x pubblicazione su PVP es. 300 2019 x 24.11.2026.pdf",
+            "Ordinanza di vendita x asta 26112026.pdf",
+            "Avviso vendita x ud 15.12.26_signed.pdf",
+            "Avviso di vendita IV incanto x Comune_Trib .pdf",
+        ]
+        for name in cases:
+            with self.subTest(filename=name):
+                result = parse_sale_attempt_from_filenames([name])
+                expected = "IV" if "IV incanto" in name else ""
+                self.assertEqual(result["value"], expected)
+        self.assertEqual(
+            parse_sale_attempt_from_filenames(["X avviso 18.11.2026.pdf"])["value"], "X"
+        )
+
     def test_multiple_prior_notices_choose_highest_valid_and_expose_conflict(self):
         outcome = parse_sale_attempt_from_filenames([
             "I AVVISO VENDITA.pdf",
