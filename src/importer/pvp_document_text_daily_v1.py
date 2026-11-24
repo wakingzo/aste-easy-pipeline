@@ -43,7 +43,10 @@ def supabase(session, method, base, key, resource, *, params=None, payload=None)
     headers={"apikey":key,"Authorization":"Bearer "+key, "Accept":"application/json"}
     if payload is not None:
         headers["Content-Type"]="application/json"
-        headers["Prefer"]="resolution=merge-duplicates,return=minimal"
+        # RPC endpoints must return their JSON payloads. Only table upserts
+        # need Prefer return=minimal and conflict resolution.
+        if resource == "listing_allegati_testo":
+            headers["Prefer"]="resolution=merge-duplicates,return=minimal"
     response=session.request(method,base.rstrip("/")+"/rest/v1/"+resource,
         params=params,json=payload,headers=headers,timeout=(10,45),
         allow_redirects=False)
