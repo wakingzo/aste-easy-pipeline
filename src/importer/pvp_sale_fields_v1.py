@@ -2,8 +2,9 @@
 
 No I/first-sale default: an absent API field stays absent. Promotional catalog
 identifiers (Quimmo "Codice annuncio") are not valid lot labels when identical
-to the reported 'numeroLotto'. Only the two dedicated numeroLotto fields are
-eligible; codiLotto is an internal code, not a human lot number.
+to the reported structured lot label. Real PVP search "numeroLotto" matches
+detail.lotto.codLotto (20/20 sampled on 24 November 2026). We do not
+use codiLotto or idLotto as human-readable lot numbers.
 """
 from __future__ import annotations
 
@@ -49,13 +50,17 @@ def _is_promotional_code(number: str, description: str) -> bool:
 
 
 def pvp_lot_number(detail_body: dict | None, search_item: dict | None, description: str = "") -> str:
-    """Trust numeroLotto only; reject exact Quimmo advertising-code collisions."""
+    """Use PVP search.numeroLotto or detail.lotto.codLotto, not codiLotto/idLotto."""
     detail_body = detail_body if isinstance(detail_body, dict) else {}
     search_item = search_item if isinstance(search_item, dict) else {}
     nested_lotto = detail_body.get("lotto") or {}
     if not isinstance(nested_lotto, dict):
         nested_lotto = {}
-    for raw in (search_item.get("numeroLotto"), nested_lotto.get("numeroLotto")):
+    for raw in (
+        search_item.get("numeroLotto"),
+        nested_lotto.get("codLotto"),
+        nested_lotto.get("numeroLotto"),  # defensive support for older payloads
+    ):
         value = _clean(raw)
         if value and not _is_promotional_code(value, description):
             return value
