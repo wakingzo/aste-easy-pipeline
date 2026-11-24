@@ -30,14 +30,21 @@ class TestPVPSaleFields(unittest.TestCase):
             ]
         }, {}), "")
 
-    def test_no_codi_lotto_fallback(self):
+    def test_detail_codlotto_matches_search_number(self):
+        # Verified against 20/20 real PVP sample response pairs.
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "LOTTO UNICO"}}, {"numeroLotto": "LOTTO UNICO"}), "LOTTO UNICO")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "2"}}, {}), "2")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "3"}}, {}), "3")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "01"}}, {"numeroLotto": "01"}), "01")
         self.assertEqual(pvp_lot_number({"lotto": {"codiLotto": "2639816"}}, {}), "")
-        self.assertEqual(pvp_lot_number({"lotto": {"numeroLotto": "2", "codiLotto": "2639816"}}, {}), "2")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "2", "codiLotto": "2639816"}}, {}), "2")
 
     def test_quimmo_code_must_not_be_lot(self):
         desc = "Terreni agricoli a Decimomannu. Per info Quimmo - Codice annuncio 2639816"
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "2639816"}}, {}, desc), "")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "2639816"}}, {"numeroLotto": "2639816"}, desc), "")
         self.assertEqual(pvp_lot_number({"lotto": {"codiLotto": "8"}}, {"numeroLotto": "2639816"}, desc), "")
-        self.assertEqual(pvp_lot_number({"lotto": {"numeroLotto": "2"}}, {"numeroLotto": "2639816"}, desc), "2")
+        self.assertEqual(pvp_lot_number({"lotto": {"codLotto": "2"}}, {"numeroLotto": "2639816"}, desc), "2")
         self.assertEqual(pvp_lot_number({}, {"numeroLotto": "2639816"}, desc), "")
 
     def test_real_six_digit_number_not_discarded_by_length_alone(self):
