@@ -60,7 +60,12 @@ _TOKEN = re.compile(r"[A-Z]+|\d+(?:[°ºª^])?")
 
 
 def _tokens(filename: str) -> list[str]:
-    s = unicodedata.normalize("NFKD", str(filename or "")).upper()
+    # In Italian filenames a lowercase "x" commonly abbreviates "per":
+    # "avviso x pubblicazione", "ordinanza x asta". It is NOT Roman X.
+    # Preserve uppercase X as a possible ordinal ("X AVVISO").
+    s = unicodedata.normalize("NFKD", str(filename or ""))
+    s = re.sub(r"(?<![A-Za-z0-9])x(?![A-Za-z0-9])", " ", s)
+    s = s.upper()
     # PVP's automatically generated "attoprincipale_1" refers to attachment
     # sequence, not necessarily to the sale attempt.
     s = re.sub(r"(?:\d{8,})?ATTOPRINCIPALE[\s_-]*\d+", " ", s)
