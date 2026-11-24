@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - src/audit/pvp_historical_sale_fields_preview_v1.py
+      - src/importer/pvp_sale_attempt_parser_v1.py
+      - tests/test_pvp_sale_fields_v1.py
       - .github/workflows/pvp-historical-sale-fields-preview.yml
   workflow_dispatch:
 
