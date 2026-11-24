@@ -156,6 +156,69 @@ class TestPVPSaleFields(unittest.TestCase):
             parse_sale_attempt_from_filenames(["X avviso 18.11.2026.pdf"])["value"], "X"
         )
 
+    def test_real_pvp_bando_and_esp_exp_variants(self):
+        # From production attachment filenames: no PDF downloads or AI needed.
+        examples = [
+            ("BANDO III_signed.pdf", "III"),
+            ("BANDO II_signed.pdf", "II"),
+            ("BANDO I bis_signed.pdf", "I"),
+            ("Avviso-di-vendita-3exp-lotti 15-22.pdf", "III"),
+            ("avviso_vendita_5exp_RGE189_2023_depositato.pdf", "V"),
+            ("bando_esp5 TR.pdf", "V"),
+            ("BANDO AREA CREMONA VIA QUINZANI - 6o ESPERIMENTO.pdf", "VI"),
+            ("BANDO II ESP.PDF", "II"),
+            ("bando 7 esp LOTTO 2.pdf", "VII"),
+            ("9_26_bando 2 esp.pdf", "II"),
+            ("003_RGE_29_2025_AVVISO_DI_VENDITA_ESP_01_DEPURATO.pdf", "I"),
+            ("AVVISO VENDITA 15.18_ESP-1.pdf", "I"),
+            ("AvvisoVendita_34427_34428_34429_5esp_Immobili_firmato.pdf", "V"),
+            ("RGE1062024IIAvvisodivenditatelematicaasincrona.pdf", "II"),
+            ("10exp - 17.02.27.pdf", "X"),
+            ("2esperimento di vendita.pdf", "II"),
+            ("avviso di vendita III esp 29 01 27_signed.pdf", "III"),
+            ("BANDO LOTTO 6 CODOGNO CASCINA GAZZINA III - 2° ESPERIMENTO.pdf", "II"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                found = parse_sale_attempt_from_filenames([filename])
+                self.assertEqual(found["value"], expected, found["evidence"])
+                self.assertFalse(found["multiple_values"], found["evidence"])
+
+    def test_history_new_false_positives_have_explicit_guards(self):
+        examples = [
+            ("L12_bando_vendita_270113.pdf", ""),
+            ("L19_bando_vendita_270113.pdf", ""),
+            ("all.5 bando di vendita.pdf", ""),
+            ("Ist. 9_Bando terzo esperimento.pdf", "III"),
+            ("AVVISO DI VENDITA nrfall 13 2016_4^esp_signed.pdf", "IV"),
+            ("provv_vend_II° esp _ 08gen2027_ 09_2024.pdf", "II"),
+            ("rge_916-2023_ll._1_2_3_4_e_5_avviso_di_vendita_cartabia_primo_esp.pdf", "I"),
+            ("V° ESP - AVVISO VENDITA - LOTTO N. 2- L.G. N. 3-2024.pdf", "V"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                result = parse_sale_attempt_from_filenames([filename])
+                self.assertEqual(result["value"], expected, result["evidence"])
+                self.assertFalse(result["multiple_values"], result["evidence"])
+
+    def test_bando_and_abbreviation_false_positives_are_excluded(self):
+        examples = [
+            "BANDO LIQUIDAZIONI GIUDIZIALI IMMOBILI - LG 37_2025.pdf",
+            "Bando vendita posti auto_1_redacted.pdf",
+            "BANDO LOTTO 6 CODOGNO.pdf",
+            "SO - Bando di Gara Torri direzionali.pdf",
+            "perizia cespiti_EP.pdf",
+            "Es Imm 49.25 - AVVISO DI VENDITA.pdf",
+            "AVVISO VENDITA 29.01.2027.pdf",
+            "BANDO 16-2025 LG.pdf",
+            "BANDO x pubblicazione.pdf",
+            "003_RGE_29_2025_AVVISO_DI_VENDITA_01_DEPURATO.pdf",
+            "ESP. 2024.pdf",
+        ]
+        for filename in examples:
+            with self.subTest(filename=filename):
+                self.assertEqual(parse_sale_attempt_from_filenames([filename])["value"], "")
+
     def test_multiple_prior_notices_choose_highest_valid_and_expose_conflict(self):
         outcome = parse_sale_attempt_from_filenames([
             "I AVVISO VENDITA.pdf",

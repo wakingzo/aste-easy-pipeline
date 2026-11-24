@@ -1,7 +1,7 @@
 """Context-aware PVP sale-attempt parser, recovered from March 2026 enrichment.
 
 Candidates are accepted only when an ordinal is locally related to a sale
-event (avviso, vendita, esperimento, tentativo, gara, incanto, tornata).
+event (avviso, bando, vendita, esperimento, tentativo, gara, incanto, tornata).
 No stand-alone Roman numeral extraction. With multiple prior notices, select
 the highest *contextual* attempt as the March parser did, but report conflicts
 and evidence; don't imply that this heuristic is legally verified.
@@ -38,15 +38,21 @@ _CONTEXT = {
     "AVVISO", "AVVISI", "VENDITA", "VENDITE", "ESPERIMENTO",
     "ESPERIMENTI", "TENTATIVO", "TENTATIVI", "GARA", "GARE",
     "INCANTO", "INCANTI", "TORNATA", "TORNATE", "ASTA", "ASTE",
+    "BANDO", "BANDI", "ESP", "EXP", "ESPERIM", "ESPER",
 }
 _STRONG = {
     "ESPERIMENTO", "ESPERIMENTI", "TENTATIVO", "TENTATIVI",
     "GARA", "GARE", "INCANTO", "INCANTI", "TORNATA", "TORNATE",
+    # ESP/EXP are widespread abbreviations; ES is often "esecuzione", so exclude it.
+    "ESP", "EXP", "ESPERIM", "ESPER",
 }
 _EXCLUDE_PRECEDING = {
     "LOTTO", "LOTTI", "FOGLIO", "PARTICELLA", "PART", "SUB",
     "SUBALTERNO", "PROCEDURA", "RGE", "RG", "RGEN", "PVP",
     "PAG", "PAGINA", "ART", "ARTICOLO",
+    # Attachment indices, abbreviated lots, motion/filing numbers.
+    "L", "LL", "ALL", "ALLEG", "ALLEGATO", "ALLEGATI",
+    "IST", "ISTANZA",
 }
 _CONNECTORS = {"DI", "DELLA", "DELLE", "DEL", "N", "NR", "NUM", "NUMERO"}
 # These markers label numbering explicitly. DEL/DI/DELLA are not number
@@ -68,6 +74,19 @@ def _tokens(filename: str) -> list[str]:
     s = unicodedata.normalize("NFKD", str(filename or ""))
     s = re.sub(r"(?<![A-Za-z0-9])x(?![A-Za-z0-9])", " ", s)
     s = s.upper()
+    # Actual PVP titles sometimes use "6o ESPERIMENTO" (ordinal suffix o).
+    # Normalize only with an immediate sales context, never in arbitrary codes.
+    s = re.sub(
+        r"(?<![A-Z0-9])(\d{1,2})O(?=[\s_.-]*(?:ESPERIMENTO|ESPERIM|ESP|EXP|BANDO|AVVISO|VENDITA|GARA|ASTA|TENTATIVO|INCANTO)\b)",
+        r"\1°", s,
+    )
+    # PVP can concatenate the RGE identifier, Roman attempt and notice:
+    # "RGE1062024IIAvvisodivendita" -> "RGE1062024 II AVVISO ..."
+    # Only split when a complete numeral is followed by explicit AVVISO DI VENDITA.
+    s = re.sub(
+        r"(?<=\d)([IVX]{1,6})(?=AVVISO(?:DI)?VENDITA)",
+        r" \1 AVVISO ", s,
+    )
     # PVP's automatically generated "attoprincipale_1" refers to attachment
     # sequence, not necessarily to the sale attempt.
     s = re.sub(r"(?:\d{8,})?ATTOPRINCIPALE[\s_-]*\d+", " ", s)
@@ -75,11 +94,19 @@ def _tokens(filename: str) -> list[str]:
     # not "first experiment" after "secondo esperimento".
     s = re.sub(r"\(\s*\d{1,2}\s*\)(?=(?:\.(?:PDF|DOCX?|ODT|RTF|TXT|P7M))+$)", " ", s)
     s = re.sub(r"(?:\.(?:PDF|DOCX?|ODT|RTF|TXT|P7M))+$", " ", s)
+    # Preserve an explicitly marked attempt appended to a procedure year:
+    # "nrfall 13 2016_4^esp" has IV experiment after case/year 13/2016.
+    s = re.sub(
+        r"(?<!\d)(\d{4})[_-](\d{1,2}[°ºª^])(?=[\s_.-]*(?:ESPERIMENTO|ESPERIM|ESP|EXP)(?![A-Z]))",
+        r"\1 DATESEQ \2 ", s,
+    )
     # Remove dates and numerical case references *before* splitting separators:
     # "27-16 avviso 4 asta 10-02-27" -> only "4 asta" is a candidate.
     # "AVVISO VENDITA DEL 19-02-2027" -> no candidate.
     # Keep standalone ordinal + context, including "2-avviso" and "VI_gara".
-    s = re.sub(r"(?<!\d)\d{1,4}(?:\s*[-/._]\s*\d{1,4}){1,3}(?!\d)", " ", s)
+    # Keep a nonnumeric sentinel: removing a date entirely can inadvertently
+    # make a procedure number become adjacent to ESP/BANDO (e.g. 13 2016_4^esp).
+    s = re.sub(r"(?<!\d)\d{1,4}(?:\s*[-/._]\s*\d{1,4}){1,3}(?!\d)", " DATESEQ ", s)
     s = re.sub(r"[_/\-]+", " ", s)
     return _TOKEN.findall(s)
 
@@ -94,6 +121,9 @@ def _ordinal(token: str):
         n = int(m.group(1))
         if 1 <= n <= 20 and not token.startswith("0"):
             return n, ("ordinal" if m.group(2) else "cardinal")
+        if 1 <= n <= 9 and re.fullmatch(r"0[1-9]", token):
+            # Accept 01..09 only when explicitly coupled with ESP/EXP etc.
+            return n, "padded"
     return None
 
 
@@ -103,9 +133,17 @@ def _context_for(tokens: list[str], i: int, kind: str):
     right = tokens[i + 1:]
     if left and left[-1] in _EXCLUDE_PRECEDING:
         return None
+    # "lotti 1 2 3 4 E 5 AVVISO" -- don't promote the last lot to a sale.
+    if kind in {"cardinal", "padded"} and left and left[-1] == "E":
+        return None
+    if kind == "padded" and not (
+        (left and left[-1] in _STRONG)
+        or (right and right[0] in _STRONG)
+    ):
+        return None
     # "secondo esperimento 14 gennaio": 14 is a calendar day, not an
     # additional fourteenth sale. Both can occur in the same filename.
-    if kind == "cardinal" and right and right[0] in _MONTHS:
+    if kind in {"cardinal", "padded"} and right and right[0] in _MONTHS:
         return None
     # "29 10 AVVISO": day + month written with spaces.
     if (kind == "cardinal" and left and left[-1].isdigit()
@@ -144,7 +182,7 @@ def _context_for(tokens: list[str], i: int, kind: str):
             return before[-1], "context_before_number"
         if len(before) > 1 and before[-1] in _NUMBER_LABELS and before[-2] in _CONTEXT:
             return before[-2], "numbered_context"
-        if before[-1] in {"AVVISO", "AVVISI", "VENDITA", "VENDITE", "ASTA", "ASTE"}:
+        if before[-1] in {"AVVISO", "AVVISI", "VENDITA", "VENDITE", "ASTA", "ASTE", "BANDO", "BANDI"}:
             # A plain "avviso 2" / "vendita 2" can be a version/copy suffix.
             # The ordinal sign, a Roman numeral or a written ordinal makes it explicit.
             if kind != "cardinal":
