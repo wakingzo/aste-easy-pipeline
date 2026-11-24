@@ -97,7 +97,7 @@ def _tokens(filename: str) -> list[str]:
     # Preserve an explicitly marked attempt appended to a procedure year:
     # "nrfall 13 2016_4^esp" has IV experiment after case/year 13/2016.
     s = re.sub(
-        r"(?<!\d)(\d{4})[_-](\d{1,2}[°ºª^])(?=[\s_.-]*(?:ESP|EXP|ESPERIMENTO|ESPERIM)\b)",
+        r"(?<!\d)(\d{4})[_-](\d{1,2}[°ºª^])(?=[\s_.-]*(?:ESPERIMENTO|ESPERIM|ESP|EXP)(?![A-Z]))",
         r"\1 DATESEQ \2 ", s,
     )
     # Remove dates and numerical case references *before* splitting separators:
