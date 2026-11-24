@@ -55,6 +55,46 @@ class TestPDFNoticeText(unittest.TestCase):
                 self.assertEqual(
                     extract_attempt_from_first_page_text(text)["roman"],expect)
 
+    def test_ordinal_avviso_di_vendita_heading(self):
+        # Real user-checked PVP case: "avviso6 158.21" PDF page 1 says
+        # "6° avviso di vendita", rather than "VI esperimento".
+        cases=[
+            ("TRIBUNALE\nPROCEDURA ESECUTIVA\n6° AVVISO DI VENDITA\nLOTTO 1", "VI"),
+            ("AVVISO\nVI AVVISO DI VENDITA\nLOTTO UNICO", "VI"),
+            ("TRIBUNALE\nSESTO AVVISO DI VENDITA\nLOTTO UNICO", "VI"),
+            ("IV ESPERIMENTO\n6° AVVISO DI VENDITA", None),
+        ]
+        for text,expected in cases:
+            with self.subTest(text=text):
+                result=extract_attempt_from_first_page_text(text)
+                self.assertEqual(result["roman"],expected)
+                self.assertEqual(result["status"],"ambiguous" if expected is None else "explicit")
+
+    def test_reduction_is_a_hint_not_a_guessed_attempt(self):
+        first_page=("TRIBUNALE ORDINARIO\nPROCEDURA ESECUTIVA N. 123/2024\n"
+                    "AVVISO DI VENDITA\nSi dispone una riduzione del prezzo base\n")
+        result=extract_attempt_from_first_page_text(first_page)
+        self.assertEqual(result["status"],"not_found")
+        self.assertIsNone(result["number"])
+        self.assertIsNone(result["roman"])
+        self.assertTrue(result["possible_previous_sale"])
+        self.assertIn("RIDUZIONE DEL PREZZO",result["possible_previous_sale_evidence"])
+
+    def test_standard_offer_reduction_does_not_prove_prior_attempt(self):
+        text=("TRIBUNALE\nAVVISO DI VENDITA\n"
+              "L'offerta può essere inferiore al prezzo base, "
+              "con ribasso non superiore al 25%")
+        result=extract_attempt_from_first_page_text(text)
+        self.assertEqual(result["status"],"not_found")
+        self.assertFalse(result["possible_previous_sale"])
+
+    def test_roman_or_article_without_full_sale_notice_is_not_attempt(self):
+        text=("La gara avverrà a norma dell'art. 573 cpc.\n"
+              "Sono previsti 6 avvisi informativi.\nLOTTO N. 6")
+        result=extract_attempt_from_first_page_text(text)
+        self.assertEqual(result["status"],"not_found")
+        self.assertIsNone(result["roman"])
+
     def test_conflicting_header_numbers_go_to_review(self):
         x=extract_attempt_from_first_page_text("IV ESPERIMENTO\nVI ESPERIMENTO\n")
         self.assertEqual(x["status"],"ambiguous")
