@@ -35,7 +35,8 @@ _ORD = (r"(?:UNDICESIM[OA]|DODICESIM[OA]|SETTIM[OA]|SECON[DOA]{2}|"
 # Require explicit label, not "art. 12" or "lotto IV".
 _AFTER = re.compile(
     rf"(?<![A-Z0-9])(?P<token>{_ORD})\s*[°ºª^O]?\s+"
-    rf"(?P<label>ESPERIMENTO|TENTATIVO)(?:\s+DI\s+VENDITA)?\b",
+    rf"(?P<label>ESPERIMENTO|TENTATIVO|AVVISO\s+DI\s+VENDITA)"
+    rf"(?:\s+DI\s+VENDITA)?\b",
     re.I,
 )
 _BEFORE = re.compile(
@@ -43,8 +44,16 @@ _BEFORE = re.compile(
     rf"(?:N[.°º]?\s*|NUMERO\s+)?(?P<token>{_ORD})(?![A-Z0-9])",
     re.I,
 )
-# No "GARA" in PDF text extraction by default: a document can contain many
-# legal references to a gara; the heading uses ESPERIMENTO or TENTATIVO.
+# Do not match generic "GARA": it appears in statutory/legal notices.
+# "6° AVVISO DI VENDITA" is accepted only with the complete phrase.
+# A discount or reduction suggests a preceding sale but is NOT an ordinal.
+_REDUCED_PRICE = re.compile(
+    r"\b(?:ULTERIORE\s+RIBASSO|RIDUZIONE\s+(?:DEL|DI)\s+PREZZO"
+    r"|PREZZO\s+(?:BASE\s+)?(?:GIA\s+)?RIDOTT[OA]"
+    r"|PREZZO\s+(?:BASE\s+)?RIBASSATO"
+    r"|RIBASSO\s+RISPETTO\s+ALL[AO]\s+PRECEDENT[EA]\s+VENDITA)\b",
+    re.I,
+)
 
 def _fold(value):
     return unicodedata.normalize("NFKD", str(value or "")).upper()
@@ -100,6 +109,7 @@ def extract_attempt_from_first_page_text(text: str) -> dict:
                                      "text": m.group(0)[:150],
                                      "line": line_no})
     numbers = set(x["number"] for x in evidence)
+    reduced_match = _REDUCED_PRICE.search(_fold(text))
     result = {
         "status": ("ambiguous" if len(numbers)>1 else
                    "explicit" if len(numbers)==1 else "not_found"),
@@ -107,6 +117,11 @@ def extract_attempt_from_first_page_text(text: str) -> dict:
         "number": next(iter(numbers)) if len(numbers)==1 else None,
         "evidence": evidence[:8],
         "document_type": _type(text[:6500]),
+        # Evidence for a *possible* previous sale. It never determines N,
+        # and must not be interpreted as proof of a specific experiment.
+        "possible_previous_sale": bool(reduced_match),
+        "possible_previous_sale_evidence": (
+            reduced_match.group(0)[:100] if reduced_match else None),
     }
     return result
 
@@ -126,6 +141,9 @@ def read_first_page_pdf(pdf_bytes: bytes) -> dict:
             "status": "unreadable_text", "roman": None, "number": None,
             "evidence": [], "document_type": "da_verificare",
             "extracted_chars": len(text), "pages_total": n_pages,
+            # Unreadable does not mean absence of price-reduction hints.
+            "possible_previous_sale": None,
+            "possible_previous_sale_evidence": None,
         }
     parsed = extract_attempt_from_first_page_text(text)
     # Boolean diagnostics only: never save first-page text or contact details.
