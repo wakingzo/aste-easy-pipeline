@@ -94,6 +94,34 @@ class TestPVPSaleFields(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertEqual(parse_sale_attempt_from_filenames([filename])["value"], "")
 
+    def test_real_sample_calendar_and_procedure_numbers_never_override_attempt(self):
+        # Discovered on Nov 24 2026 in a 300-RAW sample; initially affected 11 rows.
+        examples = [
+            ("AVVISO VENDITA DEL 19-02-2027 PROC 450-2018.pdf", ""),
+            ("Avviso_vendita_secondo_esperimento_14_gennaio_2027_signed_redacted.pdf", "II"),
+            ("27-16 avviso 4 asta 10-02-27 mista.pdf", "IV"),
+            ("III AVVISO DI VENDITA RGE 211-24-signed.pdf", "III"),
+            ("2026.11.20.I.Avviso.vendita_signed.pdf", "I"),
+            ("Avviso vendita 1° esp. 09.02.2027 RGEI n. 878_245 lotto 2.pdf", "I"),
+            ("I Esperimento L.G. 06-26 - 28.01.2027.pdf", "I"),
+            ("IV_ AVVISO VENDITA BENI ARCIDOSSO LOTTO 4_1_redacted.pdf", "IV"),
+            ("AVVISO DI VENDITA II Esperimento rgei 43 2025.pdf", "II"),
+            ("II AVVISO DI VENDITA - ASTA del 28.01.2027 RGE 40-2025 Lotto 3.pdf", "II"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                match = parse_sale_attempt_from_filenames([filename])
+                self.assertEqual(match["value"], expected)
+                self.assertFalse(match["multiple_values"], filename)
+
+    def test_date_year_with_month_is_not_a_fourteenth_attempt(self):
+        result = parse_sale_attempt_from_filenames(
+            ["Avviso_vendita_secondo_esperimento_14_gennaio_2027_signed_redacted.pdf"]
+        )
+        self.assertEqual(result["value"], "II")
+        self.assertEqual(len(result["evidence"]), 1)
+        self.assertEqual(result["evidence"][0]["marker"], "SECONDO")
+
     def test_multiple_prior_notices_choose_highest_valid_and_expose_conflict(self):
         outcome = parse_sale_attempt_from_filenames([
             "I AVVISO VENDITA.pdf",
