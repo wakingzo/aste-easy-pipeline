@@ -50,6 +50,9 @@ _EXCLUDE_PRECEDING = {
     "LOTTO", "LOTTI", "FOGLIO", "PARTICELLA", "PART", "SUB",
     "SUBALTERNO", "PROCEDURA", "RGE", "RG", "RGEN", "PVP",
     "PAG", "PAGINA", "ART", "ARTICOLO",
+    # Attachment indices, abbreviated lots, motion/filing numbers.
+    "L", "LL", "ALL", "ALLEG", "ALLEGATO", "ALLEGATI",
+    "IST", "ISTANZA",
 }
 _CONNECTORS = {"DI", "DELLA", "DELLE", "DEL", "N", "NR", "NUM", "NUMERO"}
 # These markers label numbering explicitly. DEL/DI/DELLA are not number
@@ -95,7 +98,9 @@ def _tokens(filename: str) -> list[str]:
     # "27-16 avviso 4 asta 10-02-27" -> only "4 asta" is a candidate.
     # "AVVISO VENDITA DEL 19-02-2027" -> no candidate.
     # Keep standalone ordinal + context, including "2-avviso" and "VI_gara".
-    s = re.sub(r"(?<!\d)\d{1,4}(?:\s*[-/._]\s*\d{1,4}){1,3}(?!\d)", " ", s)
+    # Keep a nonnumeric sentinel: removing a date entirely can inadvertently
+    # make a procedure number become adjacent to ESP/BANDO (e.g. 13 2016_4^esp).
+    s = re.sub(r"(?<!\d)\d{1,4}(?:\s*[-/._]\s*\d{1,4}){1,3}(?!\d)", " DATESEQ ", s)
     s = re.sub(r"[_/\-]+", " ", s)
     return _TOKEN.findall(s)
 
@@ -122,6 +127,9 @@ def _context_for(tokens: list[str], i: int, kind: str):
     right = tokens[i + 1:]
     if left and left[-1] in _EXCLUDE_PRECEDING:
         return None
+    # "lotti 1 2 3 4 E 5 AVVISO" -- don't promote the last lot to a sale.
+    if kind in {"cardinal", "padded"} and left and left[-1] == "E":
+        return None
     if kind == "padded" and not (
         (left and left[-1] in _STRONG)
         or (right and right[0] in _STRONG)
@@ -129,7 +137,7 @@ def _context_for(tokens: list[str], i: int, kind: str):
         return None
     # "secondo esperimento 14 gennaio": 14 is a calendar day, not an
     # additional fourteenth sale. Both can occur in the same filename.
-    if kind == "cardinal" and right and right[0] in _MONTHS:
+    if kind in {"cardinal", "padded"} and right and right[0] in _MONTHS:
         return None
     # "29 10 AVVISO": day + month written with spaces.
     if (kind == "cardinal" and left and left[-1].isdigit()
