@@ -49,6 +49,13 @@ _EXCLUDE_PRECEDING = {
     "PAG", "PAGINA", "ART", "ARTICOLO",
 }
 _CONNECTORS = {"DI", "DELLA", "DELLE", "DEL", "N", "NR", "NUM", "NUMERO"}
+# These markers label numbering explicitly. DEL/DI/DELLA are not number
+# qualifiers; they often introduce the *date* of a sale instead.
+_NUMBER_LABELS = {"N", "NR", "NUM", "NUMERO"}
+_MONTHS = {
+    "GENNAIO", "FEBBRAIO", "MARZO", "APRILE", "MAGGIO", "GIUGNO",
+    "LUGLIO", "AGOSTO", "SETTEMBRE", "OTTOBRE", "NOVEMBRE", "DICEMBRE",
+}
 _TOKEN = re.compile(r"[A-Z]+|\d+(?:[°ºª^])?")
 
 
@@ -58,6 +65,11 @@ def _tokens(filename: str) -> list[str]:
     # sequence, not necessarily to the sale attempt.
     s = re.sub(r"(?:\d{8,})?ATTOPRINCIPALE[\s_-]*\d+", " ", s)
     s = re.sub(r"(?:\.(?:PDF|DOCX?|ODT|RTF|TXT|P7M))+$", " ", s)
+    # Remove dates and numerical case references *before* splitting separators:
+    # "27-16 avviso 4 asta 10-02-27" -> only "4 asta" is a candidate.
+    # "AVVISO VENDITA DEL 19-02-2027" -> no candidate.
+    # Keep standalone ordinal + context, including "2-avviso" and "VI_gara".
+    s = re.sub(r"(?<!\d)\d{1,4}(?:\s*[-/._]\s*\d{1,4}){1,3}(?!\d)", " ", s)
     s = re.sub(r"[_/\-]+", " ", s)
     return _TOKEN.findall(s)
 
@@ -81,6 +93,10 @@ def _context_for(tokens: list[str], i: int, kind: str):
     right = tokens[i + 1:]
     if left and left[-1] in _EXCLUDE_PRECEDING:
         return None
+    # "secondo esperimento 14 gennaio": 14 is a calendar day, not an
+    # additional fourteenth sale. Both can occur in the same filename.
+    if kind == "cardinal" and right and right[0] in _MONTHS:
+        return None
 
     # 6° gara; VI esperimento; SESTA GARA; IV AVVISO VENDITA
     after = right[:3]
@@ -95,7 +111,7 @@ def _context_for(tokens: list[str], i: int, kind: str):
     if before:
         if before[-1] in _STRONG:
             return before[-1], "context_before_number"
-        if len(before) > 1 and before[-1] in _CONNECTORS and before[-2] in _CONTEXT:
+        if len(before) > 1 and before[-1] in _NUMBER_LABELS and before[-2] in _CONTEXT:
             return before[-2], "numbered_context"
         if before[-1] in {"AVVISO", "AVVISI", "VENDITA", "VENDITE", "ASTA", "ASTE"}:
             # A plain "avviso 2" / "vendita 2" can be a version/copy suffix.
@@ -119,12 +135,13 @@ def parse_sale_attempt_from_filenames(filenames) -> dict:
         filename = str(filename or "").strip()
         if not filename:
             continue
-        for i, tok in enumerate(_tokens(filename)):
+        tokens = _tokens(filename)
+        for i, tok in enumerate(tokens):
             numeric = _ordinal(tok)
             if numeric is None:
                 continue
             n, kind = numeric
-            context = _context_for(_tokens(filename), i, kind)
+            context = _context_for(tokens, i, kind)
             if not context:
                 continue
             label, rule = context
