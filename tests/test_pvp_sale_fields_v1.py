@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests: do not infer sale attempts from attachment filenames."""
+"""Regression tests: source-provenanced API + contextual March parser fallback."""
 import sys
 from pathlib import Path
 import unittest
@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from importer.pvp_sale_fields_v1 import pvp_lot_number, pvp_sale_attempt
+from importer.pvp_sale_attempt_parser_v1 import parse_sale_attempt_from_filenames, resolve_sale_attempt, attempt_number
 
 
 class TestPVPSaleFields(unittest.TestCase):
@@ -56,7 +57,76 @@ class TestPVPSaleFields(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertEqual(pvp_lot_number({}, {"numeroLotto": "2639816"}, label), "")
 
-    def test_no_filename_parser_or_codilotto_in_production_derive(self):
+    def test_contextual_parser_march_examples(self):
+        examples = [
+            ("IV_ AVVISO VENDITA BENI ARCIDOSSO LOTTO 4_1_redacted.pdf", "IV"),
+            ("2° esperimento.pdf", "II"),
+            ("2 esperimento.pdf", "II"),
+            ("VI gara.pdf", "VI"),
+            ("6° gara.pdf", "VI"),
+            ("SESTA GARA.pdf", "VI"),
+            ("seconda vendita.pdf", "II"),
+            ("AVVISO 5vendita.pdf", "V"),
+            ("avviso n. 4.pdf", "IV"),
+            ("AVVISO DI VENDITA LOTTO 17 XENA IMMOBILIARE - 1 TENTATIVO.docx", "I"),
+            ("3° TENTATIVO DI VENDITA.pdf", "III"),
+            ("10^ AVVISO DI VENDITA.pdf", "X"),
+            ("vendita VI.pdf", "VI"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                self.assertEqual(parse_sale_attempt_from_filenames([filename])["value"], expected)
+
+    def test_unrelated_numbers_and_machine_filenames_are_ignored(self):
+        filenames = [
+            "DELEGA PRIVACY .pdf",
+            "00057610000093400244311attoprincipale_1 avviso di vendita.docx.pdf",
+            "AVVISO DI VENDITA LOTTO 4.pdf",
+            "Avviso di vendita 2 (2).pdf",
+            "AVVISO VENDITA 19.01.2027.pdf",
+            "FOTO LOTTO 9.pdf",
+            "Avviso di vendita terreno VIGONOVO.pdf",
+            "perizia in data 05-12-2026.pdf",
+            "AVVISO VENDITA XENA IMMOBILIARE.pdf",
+            "planimetria piano VI.pdf",
+        ]
+        for filename in filenames:
+            with self.subTest(filename=filename):
+                self.assertEqual(parse_sale_attempt_from_filenames([filename])["value"], "")
+
+    def test_multiple_prior_notices_choose_highest_valid_and_expose_conflict(self):
+        outcome = parse_sale_attempt_from_filenames([
+            "I AVVISO VENDITA.pdf",
+            "IV AVVISO VENDITA.pdf",
+            "II AVVISO VENDITA.pdf",
+            "DELEGA PRIVACY.pdf",
+        ])
+        self.assertEqual(outcome["value"], "IV")
+        self.assertTrue(outcome["multiple_values"])
+        self.assertEqual({m["value"] for m in outcome["evidence"]}, {"I", "II", "IV"})
+
+    def test_api_is_authoritative_and_audit_records_disagreement(self):
+        r = resolve_sale_attempt({"numeEsperimento": "2", "allegati": [{"nomeFile": "VI GARA.pdf"}]}, {})
+        self.assertEqual(r["value"], "2")
+        self.assertEqual(r["source"], "api_detail")
+        self.assertEqual(r["parsed_value"], "VI")
+        self.assertIs(r["api_parser_agree"], False)
+        r = resolve_sale_attempt({"numeEsperimento": "VI", "allegati": [{"nomeFile": "6° GARA.pdf"}]}, {})
+        self.assertIs(r["api_parser_agree"], True)
+        self.assertEqual(r["source"], "api_detail")
+        self.assertEqual(r["value"], "VI")
+
+    def test_api_missing_falls_back_only_when_contextual(self):
+        r = resolve_sale_attempt({"allegati": [{"nomeFile": "6° gara.pdf"}]}, {})
+        self.assertEqual((r["value"], r["source"]), ("VI", "filename"))
+        self.assertIsNone(r["api_parser_agree"])
+        r = resolve_sale_attempt({"allegati": [{"nomeFile": "DELEGA PRIVACY.pdf"}]}, {})
+        self.assertEqual((r["value"], r["source"]), ("", "missing"))
+        r = resolve_sale_attempt({}, {}, ["AVVISO 3° TENTATIVO.pdf"])
+        self.assertEqual((r["value"], r["source"]), ("III", "filename"))
+        self.assertEqual(attempt_number("10"), 10)
+
+    def test_only_contextual_parser_used_in_production_derive(self):
         for relative in (
             "src/importer/pvp_import_consolidated_preview.py",
             "src/importer/pvp_import_from_api_raw_hybrid_FINAL.py",
@@ -67,7 +137,7 @@ class TestPVPSaleFields(unittest.TestCase):
                 content = (ROOT / relative).read_text(encoding="utf-8")
                 self.assertNotIn("extract_esperimento_from_filenames", content)
                 self.assertIn("pvp_lot_number(detail_body, search_item", content)
-                self.assertIn("pvp_sale_attempt(detail_body, search_item)", content)
+                self.assertIn("resolve_sale_attempt(detail_body, search_item", content)
 
 
 if __name__ == "__main__":
