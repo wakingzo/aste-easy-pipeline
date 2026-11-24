@@ -106,7 +106,8 @@ def main(argv=None):
                     row = {
                         "pvp_id": pid,
                         "search_numeroLotto": search_item.get("numeroLotto"),
-                        "detail_lotto_numeroLotto": lot.get("numeroLotto"),
+                        "detail_lotto_codLotto": lot.get("codLotto"),
+                        "detail_lotto_numeroLotto_if_present": lot.get("numeroLotto"),
                         "detail_lotto_codiLotto_FOR_REFERENCE_ONLY": lot.get("codiLotto"),
                         "detail_numeEsperimento": detail_body.get("numeEsperimento"),
                         "search_numeEsperimento": search_item.get("numeEsperimento"),
