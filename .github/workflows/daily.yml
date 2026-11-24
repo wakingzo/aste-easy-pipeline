@@ -259,7 +259,8 @@ jobs:
         run: |
           set -euo pipefail
           docker compose run --rm daily \
-            python src/pipeline/daily_pipeline_v4.py --auto-apply
+            python src/pipeline/daily_pipeline_v4.py --auto-apply \
+              --notice-pdf-mode report --notice-pdf-max 120
 
       - name: Reconcile normalized multi-value tipologia
         if: ${{ inputs.tipologia_backfill == 'preview' || inputs.tipologia_backfill == 'apply' }}
