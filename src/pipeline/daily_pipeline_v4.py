@@ -22,6 +22,7 @@ for p in (SRC, SRC/"pipeline", SRC/"importer", SRC/"geocoding", SRC/"audit"):
 from aste_paths import RAW_DIR, REPORTS_DIR, ensure_runtime_dirs
 import daily_pipeline_v3_18 as production_daily
 import pvp_import_atomic_v2 as importer_v2
+import pvp_notice_enrichment_v1 as notice_enrichment
 import primary_pin_publisher_v2_preview as pin_preview
 import istat_boundary_runtime_v11_6 as boundary_runtime
 
@@ -355,6 +356,10 @@ def main(argv=None):
     ap.add_argument("--expected-pin-plan-sha")
     ap.add_argument("--page-size",type=int,default=200)
     ap.add_argument("--safety-days",type=int,default=2)
+    ap.add_argument("--notice-pdf-mode",choices=("off","report"),default="off",
+                    help="Read page 1 of new PVP notices and report findings; NEVER write fields")
+    ap.add_argument("--notice-pdf-max",type=int,default=120,
+                    help="Maximum PVP PDF downloads per daily run (0..150)")
     args=ap.parse_args(argv)
     if args.apply and args.auto_apply:
         ap.error("--apply and --auto-apply are mutually exclusive")
@@ -362,6 +367,8 @@ def main(argv=None):
         ap.error("--page-size must be 10..500")
     if not 0 <= args.safety_days <= 14:
         ap.error("--safety-days must be 0..14")
+    if not 0 <= args.notice_pdf_max <= 150:
+        ap.error("--notice-pdf-max must be 0..150")
 
     ensure_runtime_dirs()
     do_apply=bool(args.apply or args.auto_apply)
@@ -445,6 +452,24 @@ def main(argv=None):
     plan,pin_plan=_attach_primary_pins(plan)
     timings["attach_primary_pins"]=round(time.perf_counter()-t,3)
 
+    # Optional PVP notice read-only shadow analysis, strictly after the
+    # validated new-only plan is frozen. Does NOT modify the listing payload.
+    notice_counts = {}
+    notice_report = None
+    if args.notice_pdf_mode == "report":
+        t=time.perf_counter()
+        notice_plan = notice_enrichment.enrich_new_plan(
+            plan, delta_raw=DELTA_RAW, report_dir=Path(REPORTS_DIR),
+            mode="report", max_pdfs=args.notice_pdf_max)
+        if any(
+            notice_plan["records"][i][0] != plan["records"][i][0]
+            for i in range(len(plan["records"]))
+        ):
+            raise RuntimeError("PDF notice REPORT attempted to modify a new listing")
+        notice_counts=notice_plan.get("notice_counts",{})
+        notice_report=notice_plan.get("notice_report")
+        timings["notice_pdf_read_only"]=round(time.perf_counter()-t,3)
+
     if args.apply:
         if args.expected_new is None or not args.expected_raw_sha256 or not args.expected_pin_plan_sha:
             raise RuntimeError(
@@ -510,6 +535,9 @@ def main(argv=None):
         "skipped_concurrent":importer_summary.get("skipped_concurrent",0),
         "post_import_verify":post_verify,
         "google_calls":0,
+        "notice_pdf_mode":args.notice_pdf_mode,
+        "notice_pdf_counts":notice_counts,
+        "notice_pdf_report":notice_report,
         "timings_seconds":timings,
     }
     out=Path(REPORTS_DIR)/("daily_pipeline_v4_apply.json" if do_apply else "daily_pipeline_v4_preview.json")
