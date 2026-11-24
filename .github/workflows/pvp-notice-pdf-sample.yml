@@ -31,9 +31,10 @@ jobs:
           python -m py_compile src/importer/pvp_notice_text_v1.py src/audit/pvp_notice_pdf_probe_v1.py
           python -m unittest -v tests/test_pvp_notice_text_v1.py
       - name: Download and analyze at most 50 recent PVP notices, read only
+        if: github.event_name == 'workflow_dispatch'
         run: python src/audit/pvp_notice_pdf_probe_v1.py --missing 40 --controls 10 --lookback 600
       - name: Upload report (never actual PDFs or full document text)
-        if: always()
+        if: github.event_name == 'workflow_dispatch' && always()
         uses: actions/upload-artifact@v4
         with:
           name: pvp-notice-pdf-sample
