@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent
 SRC_ROOT = ROOT.parent
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
+from importer.pvp_sale_fields_v1 import pvp_sale_attempt, pvp_lot_number
 from aste_paths import RAW_DIR, REFERENCE_DIR, ensure_runtime_dirs
 
 # v3.15 writes into the consolidated runtime/raw area used by the importer.
@@ -1024,7 +1025,7 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
     lotto = detail_body.get("lotto") or {}
 
     descrizione = sanitize_text(search_item.get("descLotto")) or sanitize_text(lotto.get("descLotto")) or sanitize_text(detail_body.get("descLotto"))
-    lotto_txt = sanitize_text(search_item.get("numeroLotto")) or sanitize_text(detail_body.get("codiLotto")) or sanitize_text(lotto.get("numeroLotto"))
+    lotto_txt = pvp_lot_number(detail_body, search_item, descrizione or "")
 
     rialzo_val = search_item.get("rialzoMinimo")
     rialzo_txt = euro_to_db_text(rialzo_val)
@@ -1056,7 +1057,7 @@ def build_listing_row(search_item: Dict[str, Any], detail_body: Dict[str, Any]) 
         "piano": extract_field_from_beni(detail_body, ["piano", "descPiano", "ubicazionePiano"]),
         "superficie_mq": extract_field_from_beni(detail_body, ["superficie", "superficieCommerciale", "superficieMq"], "mq"),
         "note": None,
-        "esperimento_vendita": sanitize_text(detail_body.get("numeEsperimento")),
+        "esperimento_vendita": pvp_sale_attempt(detail_body, search_item),
         "cap": cap,
         "status": "active",
     }
