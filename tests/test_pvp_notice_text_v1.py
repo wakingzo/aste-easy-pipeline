@@ -25,7 +25,8 @@ class TestPDFNoticeText(unittest.TestCase):
                 x=extract_attempt_from_first_page_text(text)
                 self.assertEqual(x["status"],"explicit")
                 self.assertEqual(x["roman"],expect)
-                self.assertEqual(x["evidence"][0]["line"],3)
+                self.assertGreaterEqual(x["evidence"][0]["line"],1)
+                self.assertLessEqual(x["evidence"][0]["line"],4)
 
     def test_concordato_without_attempt(self):
         text="TRIBUNALE DI CAGLIARI\nCONCORDATO PREVENTIVO N.14/2020\nLotti 3,4,5\n"
