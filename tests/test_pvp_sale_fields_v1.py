@@ -184,6 +184,23 @@ class TestPVPSaleFields(unittest.TestCase):
                 self.assertEqual(found["value"], expected, found["evidence"])
                 self.assertFalse(found["multiple_values"], found["evidence"])
 
+    def test_history_new_false_positives_have_explicit_guards(self):
+        examples = [
+            ("L12_bando_vendita_270113.pdf", ""),
+            ("L19_bando_vendita_270113.pdf", ""),
+            ("all.5 bando di vendita.pdf", ""),
+            ("Ist. 9_Bando terzo esperimento.pdf", "III"),
+            ("AVVISO DI VENDITA nrfall 13 2016_4^esp_signed.pdf", "IV"),
+            ("provv_vend_II° esp _ 08gen2027_ 09_2024.pdf", "II"),
+            ("rge_916-2023_ll._1_2_3_4_e_5_avviso_di_vendita_cartabia_primo_esp.pdf", "I"),
+            ("V° ESP - AVVISO VENDITA - LOTTO N. 2- L.G. N. 3-2024.pdf", "V"),
+        ]
+        for filename, expected in examples:
+            with self.subTest(filename=filename):
+                result = parse_sale_attempt_from_filenames([filename])
+                self.assertEqual(result["value"], expected, result["evidence"])
+                self.assertFalse(result["multiple_values"], result["evidence"])
+
     def test_bando_and_abbreviation_false_positives_are_excluded(self):
         examples = [
             "BANDO LIQUIDAZIONI GIUDIZIALI IMMOBILI - LG 37_2025.pdf",
