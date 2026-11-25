@@ -30,8 +30,8 @@ from audit.pvp_document_text_smoketest_v1 import extract_digital_text
 VERSION = "pvp_notice_text_daily_v1"
 REPORTS = ROOT / "runtime" / "reports"
 LOW_WATERMARK_BYTES = 430_000_000  # 430 MB: leave ~70 MB of Free 500 MB quota.
-MAX_BATCH = 150
-MAX_DURATION = 420
+MAX_BATCH = 500
+MAX_DURATION = 900
 ROW_KEYS = {"allegato_id","pvp_id","stato_estrazione","testo_prima_pagina",
             "testo_completo","numero_pagine","sha256_pdf","parser_versione",
             "errore_tipo","estratto_il","aggiornato_il"}
@@ -144,7 +144,7 @@ def process_one(db,pvp,base,key,row,*,apply):
 
 def run(*,apply=False,max_items=MAX_BATCH,max_seconds=MAX_DURATION):
     if not 0 <= max_items <= MAX_BATCH:
-        raise ValueError("max-items outside 0..150")
+        raise ValueError(f"max-items outside 0..{MAX_BATCH}")
     if not 30 <= max_seconds <= 900:
         raise ValueError("max-seconds outside 30..900")
     base=os.environ["SUPABASE_URL"].rstrip("/")
