@@ -93,9 +93,11 @@ class TestPVPTextDaily(unittest.TestCase):
                 patch.object(module,"REPORTS",Path(td)),\
                 patch.object(module,"database_size",return_value=430_000_001),\
                 patch.object(module,"queue",side_effect=AssertionError("no reads")):
-                report=module.run(apply=True,max_items=100,max_seconds=60)
+                report=module.run(apply=True,max_items=500,max_seconds=60)
                 self.assertEqual(report["stop_reason"],"database_size_guard")
                 self.assertEqual(report["processed"],0)
+        with self.assertRaisesRegex(ValueError,"0\\.\\.500"):
+            module.run(max_items=501)
 
     def test_apply_requires_server_opt_in(self):
         with patch.dict(os.environ,{
