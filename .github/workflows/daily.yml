@@ -268,7 +268,7 @@ jobs:
         run: |
           set -euo pipefail
           docker compose run --rm -e ALLOW_PVP_TEXT_DAILY_WRITE=YES_NEW_ONLY daily \
-            python src/importer/pvp_document_text_daily_v1.py --apply --max-items 150 --max-seconds 420
+            python src/importer/pvp_document_text_daily_v1.py --apply --max-items 500 --max-seconds 900
 
       - name: Reconcile normalized multi-value tipologia
         if: ${{ inputs.tipologia_backfill == 'preview' || inputs.tipologia_backfill == 'apply' }}
