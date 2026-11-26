@@ -4,14 +4,11 @@ on:
   pull_request:
     paths:
       - "src/importer/pvp_sale_fields_v1.py"
-      - "src/importer/pvp_sale_attempt_parser_v1.py"
       - "src/importer/pvp_import_consolidated_preview.py"
       - "src/importer/pvp_import_from_api_raw_hybrid_FINAL.py"
       - "src/importer/build_listings_daily_v3_16.py"
       - "src/importer/build_listings_from_pvp_api_RAW_ONLY.py"
       - "src/audit/backup_listing_sale_fields_v1.py"
-      - "src/audit/pvp_sale_fields_raw_sample_v1.py"
-      - "src/audit/pvp_sale_fields_compare_raw_v1.py"
       - "tests/test_pvp_sale_fields_v1.py"
       - ".github/workflows/pvp-sale-fields-test.yml"
   workflow_dispatch:
@@ -29,6 +26,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Compile changed scripts
-        run: python -m compileall -q src/importer/pvp_sale_fields_v1.py src/importer/pvp_sale_attempt_parser_v1.py src/importer/pvp_import_consolidated_preview.py src/importer/pvp_import_from_api_raw_hybrid_FINAL.py src/importer/build_listings_daily_v3_16.py src/importer/build_listings_from_pvp_api_RAW_ONLY.py src/audit/backup_listing_sale_fields_v1.py src/audit/pvp_sale_fields_raw_sample_v1.py src/audit/pvp_sale_fields_compare_raw_v1.py
+      - name: Compile active sale-field scripts
+        run: python -m compileall -q src/importer/pvp_sale_fields_v1.py src/importer/pvp_import_consolidated_preview.py src/importer/pvp_import_from_api_raw_hybrid_FINAL.py src/importer/build_listings_daily_v3_16.py src/importer/build_listings_from_pvp_api_RAW_ONLY.py src/audit/backup_listing_sale_fields_v1.py
       - name: Source-only field regression tests
         run: python -m unittest -v tests/test_pvp_sale_fields_v1.py
