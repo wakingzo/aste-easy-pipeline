@@ -263,6 +263,8 @@ jobs:
               --notice-pdf-mode off
 
       - name: Archive digital text of new PVP notices (no OCR)
+        # Opt-in only: paused after read-only PDF experiment coverage audit.
+        if: ${{ vars.ENABLE_PVP_TEXT_DAILY == 'true' }}
         shell: bash
         continue-on-error: true
         run: |
