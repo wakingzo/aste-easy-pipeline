@@ -25,7 +25,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Compile changed scripts
       - name: Compile active sale-field scripts
         run: python -m compileall -q src/importer/pvp_sale_fields_v1.py src/importer/pvp_import_consolidated_preview.py src/importer/pvp_import_from_api_raw_hybrid_FINAL.py src/importer/build_listings_daily_v3_16.py src/importer/build_listings_from_pvp_api_RAW_ONLY.py src/audit/backup_listing_sale_fields_v1.py
       - name: Source-only field regression tests
