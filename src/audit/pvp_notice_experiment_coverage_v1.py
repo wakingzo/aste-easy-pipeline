@@ -94,7 +94,7 @@ def run():
         existing = fetch_existing(session, base, key, ids)
 
     counts = Counter()
-    samples = {"missing_recovered": [], "present_conflict": []}
+    samples = {"missing_recovered": [], "present_conflict": [], "missing_not_found": [], "missing_ambiguous": []}
     counts["archived_rows"] = len(rows)
     counts["distinct_pvp_ids"] = len(ids)
     for row in rows:
@@ -112,6 +112,14 @@ def run():
         counts["parse_" + status] += 1
         counts[("existing_present_" if has_existing else "existing_missing_") + status] += 1
         if status != "explicit":
+            kind = "missing_" + status
+            if (not has_existing and kind in ("missing_not_found", "missing_ambiguous")
+                    and first_page.strip() and len(samples[kind]) < 12):
+                samples[kind].append({
+                    "pvp_id": pid,
+                    "archive_status": row.get("stato_estrazione"),
+                    "first_page_characters": len(first_page),
+                })
             continue
 
         extracted = str(parsed["roman"])
@@ -159,7 +167,13 @@ def run():
     REPORT.parent.mkdir(parents=True, exist_ok=True)
     REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     # Console output contains only aggregate counts and no source document text.
-    print(json.dumps({k: v for k, v in report.items() if k != "samples"}, ensure_ascii=False))
+    console = {k: v for k, v in report.items() if k != "samples"}
+    console["samples"] = {
+        "present_conflict": samples["present_conflict"][:9],
+        "missing_not_found": samples["missing_not_found"][:8],
+        "missing_ambiguous": samples["missing_ambiguous"][:4],
+    }
+    print(json.dumps(console, ensure_ascii=False))
     print("[OUT]", REPORT)
 
 
