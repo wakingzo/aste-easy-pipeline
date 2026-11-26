@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - '.github/workflows/pvp-notice-experiment-coverage-preview.yml'
+      - 'src/audit/pvp_notice_experiment_coverage_v1.py'
   workflow_dispatch:
 
 permissions:
